@@ -53,6 +53,10 @@ SrvClass::SrvClass(ros::NodeHandle &nh)
     &SrvClass::setGripperCallback, this);
   add_collision_srv_ = nh_.advertiseService(service_ns + "/add_collision",
     &SrvClass::addCollisionCallback, this);
+  remove_collision_srv_ = nh_.advertiseService(service_ns + "/remove_collision",
+    &SrvClass::removeCollisionCallback, this);
+  pick_srv_ = nh_.advertiseService(service_ns + "/pick",
+    &SrvClass::pickCallback, this);
 
   // print to the terminal
   ROS_INFO("MoveIt! services initialisation finished, ready to go");
@@ -91,7 +95,8 @@ SrvClass::addCollisionCallback(moveit_tutorial::add_collision::Request &request,
   moveit_tutorial::add_collision::Response &response)
 {
   // TODO: use the addCollisionObject function
-
+  addCollisionObject(request.object_name, request.centre, request.dimensions,
+    request.orientation);
   response.success = true;
 
   return true;
@@ -194,4 +199,74 @@ SrvClass::addCollisionObject(std::string object_name,
   planning_scene_interface_.applyCollisionObjects(object_vector);
 
   return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void
+SrvClass::removeCollisionObject(std::string object_name)
+{
+  // create a collision object message, and a vector of these messages
+  moveit_msgs::CollisionObject collision_object;
+  std::vector<moveit_msgs::CollisionObject> object_vector;
+  
+  // input header information
+  collision_object.id = object_name;
+  collision_object.header.frame_id = base_frame_;
+
+  // define that we will be removing this collision object 
+  collision_object.operation = collision_object.REMOVE;
+
+  // add the collision object to the vector, then apply to planning scene
+  object_vector.push_back(collision_object);
+  planning_scene_interface_.applyCollisionObjects(object_vector);
+
+  return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool
+SrvClass::removeCollisionCallback(moveit_tutorial::remove_collision::Request &request,
+  moveit_tutorial::remove_collision::Response &response)
+{
+  removeCollisionObject(request.object_name);
+  response.success = true;
+
+  return true;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void
+SrvClass::pickObject(geometry_msgs::Point grasp_point)
+{
+  // movearm to the grasp point
+  geometry_msgs::Pose grasp_pose;
+  grasp_pose.position = grasp_point;
+  // get the current orientation of the end effector
+  grasp_pose.orientation = arm_group_.getCurrentPose().pose.orientation;
+
+  // adjust the orientation by roll=0, pitch=0, yaw=pi/4
+  // grasp_pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(0, 0, -M_PI/4);
+
+  // open the gripper
+  moveGripper(gripper_open_);
+
+  moveArm(grasp_pose);
+
+  // close the gripper
+  moveGripper(gripper_closed_);
+
+  // move the object to a higher position
+  grasp_pose.position.z += 0.1;
+  moveArm(grasp_pose);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+bool
+SrvClass::pickCallback(moveit_tutorial::pick::Request &request,
+  moveit_tutorial::pick::Response &response)
+{
+  pickObject(request.grasp_point);
+  response.success = true;
+
+  return true;
 }

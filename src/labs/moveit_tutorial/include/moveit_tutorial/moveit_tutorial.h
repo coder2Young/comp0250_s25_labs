@@ -47,6 +47,8 @@
 #include <tf2/LinearMath/Scalar.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_listener.h>
+/* Added by Lucas Yang*/
+#include <tf/tf.h>
 
 // standard c++ library includes (std::string, std::vector)
 #include <string>
@@ -56,6 +58,8 @@
 #include <moveit_tutorial/set_arm.h>
 #include <moveit_tutorial/set_gripper.h>
 #include <moveit_tutorial/add_collision.h>
+#include <moveit_tutorial/remove_collision.h>
+#include <moveit_tutorial/pick.h>
 
 /** \brief Class advertising MoveIt! ROS services
   *
@@ -141,6 +145,43 @@ public: // set all following functions/variables to public access
   void
   addCollisionObject(std::string object_name, geometry_msgs::Point centre, 
     geometry_msgs::Vector3 dimensions, geometry_msgs::Quaternion orientation);
+
+  /* Added by Lucas Yang*/
+  /** \brief Service callback function for removing collision objects. 
+    *
+    * \input[in] request service request message 
+    * \input[in] response service response message
+    *  
+    * \return true if service succeeds
+    */
+  bool
+  removeCollisionCallback(moveit_tutorial::remove_collision::Request &request,
+    moveit_tutorial::remove_collision::Response &response);
+
+  /** \brief MoveIt function for removing a collision object from the MoveIt planning scene
+   * 
+   * \input[in] object_name name of the object to remove
+   */
+  void
+  removeCollisionObject(std::string object_name);
+
+  /** \brief Service callback function for picking up an object. 
+    *
+    * \input[in] request service request message 
+    * \input[in] response service response message
+    *  
+    * \return true if service succeeds
+    */
+  bool
+  pickCallback(moveit_tutorial::pick::Request &request,
+    moveit_tutorial::pick::Response &response);
+
+  /** \brief MoveIt function for picking up an object
+   * 
+   * \input[in] object_name name of the object to pick up
+   */
+  void
+  pickObject(geometry_msgs::Point grasp_point);
   
   /* Variables */
 
@@ -160,6 +201,12 @@ public: // set all following functions/variables to public access
 
   /** \brief  Server for advertising add_collision_srv_  service. */
   ros::ServiceServer add_collision_srv_;
+
+  /** \brief  Server for advertising remove_collision_srv_  service. */
+  ros::ServiceServer remove_collision_srv_;
+
+  /** \brief  Server for advertising pick_srv_  service. */
+  ros::ServiceServer pick_srv_;
 
   /** \brief MoveIt interface to move groups to seperate the arm and the gripper,
     * these are defined in urdf. */
