@@ -95,7 +95,7 @@ cw1::moveArm(geometry_msgs::PoseStamped target_pose)
 }
 
 bool 
-cw1::moveGripper(float width, bool wait)
+cw1::moveGripper(float width, float wait_time)
 {
   // safety checks in case width exceeds safe values
   if (width > gripper_open_) 
@@ -123,14 +123,14 @@ cw1::moveGripper(float width, bool wait)
   ROS_INFO("Visualising plan %s", success ? "" : "FAILED");
 
   // move the gripper joints
-  if (wait)
+  if (wait_time > 0.0)
   {
     if (success) {
       moveit::core::MoveItErrorCode result = hand_group_.execute(my_plan);
   
       if (result == moveit::core::MoveItErrorCode::SUCCESS) {
         ROS_INFO("Gripper move executed successfully, waiting for completion...");
-        hand_group_.getMoveGroupClient().waitForResult(ros::Duration(5.0)); // 等待最多 5 秒
+        hand_group_.getMoveGroupClient().waitForResult(ros::Duration(wait_time)); // 等待最多 5 秒
         ROS_INFO("Gripper move completed.");
       }
       else {
@@ -187,11 +187,11 @@ cw1::task1(geometry_msgs::PoseStamped grasp_pose, geometry_msgs::PointStamped pl
   {
     ROS_INFO("======Moving down to grasp");
   }
-  grasp_pose.pose.position.z -= 0.1;
+  grasp_pose.pose.position.z -= 0.095;
   moveArm(grasp_pose);
 
   // move the gripper to the closed width
-  moveGripper(gripper_closed, true);
+  moveGripper(gripper_closed, 4.0);
 
   // move to top of place point
   place_point_pose.pose.position.z += 0.2;

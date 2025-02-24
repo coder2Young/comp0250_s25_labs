@@ -49,7 +49,7 @@ public:
   moveArm(geometry_msgs::PoseStamped target_pose);
 
   bool 
-  moveGripper(float width, bool wait = false);
+  moveGripper(float width, float wait_time = 0.0);
 
   void 
   addCollisionBasket(geometry_msgs::Point centre);
