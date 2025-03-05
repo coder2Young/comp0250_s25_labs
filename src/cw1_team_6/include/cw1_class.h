@@ -24,6 +24,8 @@ solution is contained within the cw1_team_<your_team_number> package */
 #include <tf/tf.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/CameraInfo.h>
+#include <opencv2/opencv.hpp>
+#include <cv_bridge/cv_bridge.h>
 
 // standard c++ library includes (std::string, std::vector)
 #include <string>
@@ -38,6 +40,8 @@ solution is contained within the cw1_team_<your_team_number> package */
 // #include "cw1_team_x/example.h"
 
 typedef struct camera_info{
+  int height;
+  int width;
   float fx;
   float fy;
   float cx;
@@ -121,6 +125,8 @@ public:
   std::string base_frame_ = "panda_link0";
   double gripper_open_ = 80e-3;
   double gripper_closed_ = 0.0;
+
+  geometry_msgs::Pose scan_pose_;
 
   camera_info camera_info_;
   camera_image camera_image_;

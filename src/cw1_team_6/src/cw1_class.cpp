@@ -26,6 +26,18 @@ cw1::cw1(ros::NodeHandle nh):
     &cw1::t3_callback, this);
 
   ROS_INFO("cw1 class initialised");
+
+  // Scan position should be in (0.5, 0, MAX_HEIGHT can be achieved)
+  // to make the camera cover the whole table
+  // Init position x=0.557381, y=-0.000013, z=0.612747
+  // Orientation x=0.923953, y=-0.382500, z=-0.001784, w=0.000723
+  scan_pose_.position.x = 0.35;
+  scan_pose_.position.y = 0.0;
+  scan_pose_.position.z = 0.84;
+  scan_pose_.orientation.x = 0.923953;
+  scan_pose_.orientation.y = -0.382500;
+  scan_pose_.orientation.z = -0.001784;
+  scan_pose_.orientation.w = 0.000723;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -40,6 +52,11 @@ cw1::t1_callback(cw1_world_spawner::Task1Service::Request &request,
 
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
   
+  geometry_msgs::PoseStamped current_pose = arm_group_.getCurrentPose();
+  ROS_INFO("Current pose: x=%f, y=%f, z=%f", current_pose.pose.position.x, current_pose.pose.position.y, current_pose.pose.position.z);
+  ROS_INFO("Current orientation: x=%f, y=%f, z=%f, w=%f", current_pose.pose.orientation.x, current_pose.pose.orientation.y, current_pose.pose.orientation.z, current_pose.pose.orientation.w);
+
+
   addCollisionBasket(place_point.point);
 
   pickAndPlace(pick_pose, place_point);
@@ -55,6 +72,56 @@ cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
   cw1_world_spawner::Task2Service::Response &response)
 {
   /* function which should solve task 2 */
+  std::vector<geometry_msgs::PointStamped> potential_basket_locs = request.basket_locs;
+  int num_baskets = potential_basket_locs.size();
+
+  // Move to scan pos
+  geometry_msgs::PoseStamped scan_pose;
+  scan_pose.header.frame_id = base_frame_;
+  scan_pose.pose = scan_pose_;
+
+  ROS_INFO("Moving to scan pose: x=%f, y=%f, z=%f", 
+      scan_pose_.position.x, scan_pose_.position.y, scan_pose_.position.z);
+  moveArm(scan_pose);
+
+  // Wait for the basket to spawn for 3s
+  ros::Duration(3.0).sleep();
+
+  // Iterate through potential baskets
+  for (int i = 0; i < num_baskets; ++i) {
+    geometry_msgs::PointStamped basket_loc = potential_basket_locs[i];
+    std::pair<int, int> image_loc = getLocOfCameraImage(basket_loc);
+
+    ROS_INFO("Basket %d at image location: u=%d, v=%d", i+1, image_loc.first, image_loc.second);
+  
+    // Check if the basket is in the image
+    if (image_loc.first < 0 || image_loc.first > 640 || image_loc.second < 0 || image_loc.second > 480) {
+      ROS_WARN("Basket %d not in image", i+1);
+      continue;
+    }
+    
+    // Get the color of the basket using opencv
+    cv::Mat image;
+    cv_bridge::CvImagePtr cv_ptr;
+    cv_ptr = cv_bridge::toCvCopy(camera_image_.latest_image, sensor_msgs::image_encodings::BGR8);
+    image = cv_ptr->image;
+
+    // Get the color of the basket
+    cv::Vec3b color = image.at<cv::Vec3b>(image_loc.second, image_loc.first);
+    float r = color[2] / 255.0;
+    float g = color[1] / 255.0;
+    float b = color[0] / 255.0;
+
+    // Print rgb values
+    ROS_INFO("Basket %d at image location: r=%.3f, g=%.3f, b=%.3f", i+1, r, g, b);
+
+    std::string basket_colour = colorMapping(r, g, b);
+    response.basket_colours.push_back(basket_colour);
+
+    // Print out the colours strings
+    ROS_INFO("Basket %d/%d: %s", i+1, num_baskets ,basket_colour.c_str());
+  }
+  ROS_INFO("Task2 completed");
 
   return true;
 }
@@ -123,8 +190,6 @@ cw1::moveGripper(float width, float wait_time)
   moveit::planning_interface::MoveGroupInterface::Plan my_plan;
   bool success = (hand_group_.plan(my_plan) ==
     moveit::planning_interface::MoveItErrorCode::SUCCESS);
-
-  ROS_INFO("Visualising plan %s", success ? "" : "FAILED");
 
   // move the gripper joints
   if (wait_time > 0.0)
@@ -320,6 +385,8 @@ cw1::cameraImgCallback(const sensor_msgs::ImageConstPtr& msg)
 void 
 cw1::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg) 
 {
+  camera_info_.height = msg->height;
+  camera_info_.width = msg->width;
   camera_info_.fx = msg->K[0];
   camera_info_.fy = msg->K[4];
   camera_info_.cx = msg->K[2];
@@ -340,7 +407,7 @@ cw1::getLocOfCameraImage(geometry_msgs::PointStamped basket_loc)
   
   tf_buffer_.transform(basket_loc, point_in_camera, target_frame);
 
-  ROS_INFO("Point in camera frame: x=%f, y=%f, z=%f", point_in_camera.point.x, point_in_camera.point.y, point_in_camera.point.z);
+  //ROS_INFO("Point in camera frame: x=%f, y=%f, z=%f", point_in_camera.point.x, point_in_camera.point.y, point_in_camera.point.z);
   
   int u = static_cast<int>((camera_info_.fx * point_in_camera.point.x / point_in_camera.point.z) + camera_info_.cx);
   int v = static_cast<int>((camera_info_.fy * point_in_camera.point.y / point_in_camera.point.z) + camera_info_.cy);
@@ -351,12 +418,26 @@ cw1::getLocOfCameraImage(geometry_msgs::PointStamped basket_loc)
 std::string
 cw1::colorMapping(float r, float g, float b)
 {
-  if (r == 0.1 && g == 0.1 && b == 0.8)
-    return "blue";
-  else if (r == 0.8 && g == 0.1 && b == 0.8)
+  // 0.1 0.1 0.8 = blue
+  // 0.8 0.1 0.8 = purple
+  // 0.8 0.1 0.1 = red
+  // Use a margin with 0.1 value to detect colors
+
+  if ((r > 0.7 && r < 0.9)
+        && (g > 0.0 && g < 0.2)
+        && (b > 0.7 && b < 0.9)) {
     return "purple";
-  else if (r == 0.8 && g == 0.1 && b == 0.1)
+  } else if ((r > 0.7 && r < 0.9)
+        && (g > 0.0 && g < 0.2)
+        && (b > 0.0 && b < 0.2)) {
     return "red";
-  else
+  } else if ((r > 0.0 && r < 0.2)
+        && (g > 0.0 && g < 0.2)
+        && (b > 0.7 && b < 0.9)) {
+    return "blue";
+  } else {
     return "none";
+  }
+
+  return "none";
 }

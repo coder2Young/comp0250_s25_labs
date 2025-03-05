@@ -18,7 +18,11 @@ find_package(catkin REQUIRED COMPONENTS
   pcl_ros
   cw1_world_spawner
   sensor_msgs
+  cv_bridge
+  image_transport
 )
+
+find_package(OpenCV REQUIRED)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -126,11 +130,17 @@ catkin_package(
 include_directories(
   include
   ${catkin_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 # Declare a C++ library
 add_library(${PROJECT_NAME}_cw1_class_lib
   src/cw1_class.cpp
+)
+
+target_link_libraries(${PROJECT_NAME}_cw1_class_lib
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
 )
 
 ## Add cmake target dependencies of the library
@@ -162,6 +172,7 @@ add_dependencies(cw1_solution_node
 # Specify libraries to link a library or executable target against
 target_link_libraries(cw1_solution_node
   ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
   ${PROJECT_NAME}_cw1_class_lib
 )
 
