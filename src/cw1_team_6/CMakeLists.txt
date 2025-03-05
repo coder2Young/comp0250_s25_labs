@@ -17,6 +17,7 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_ros
   pcl_ros
   cw1_world_spawner
+  sensor_msgs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -77,6 +78,7 @@ generate_messages(
   DEPENDENCIES
   std_msgs
   geometry_msgs
+  sensor_msgs
 )
 
 ################################################

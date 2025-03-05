@@ -17,6 +17,19 @@ int main(int argc, char **argv){
   // create an instance of the cw1 class
   cw1 cw_class(nh);
 
+  // Create a ROS subscriber for the input point cloud
+  ros::Subscriber sub_img =
+                  nh.subscribe ("/r200/camera/color/image_rect",
+                  1,
+                  &cw1::cameraImgCallback,
+                  &cw_class);
+
+  ros::Subscriber sub_info = 
+                nh.subscribe ("/r200/camera/color/camera_info",
+                1,
+                &cw1::cameraInfoCallback,
+                &cw_class);
+
   ros::Rate loop_rate(10);
 
   while (ros::ok()){

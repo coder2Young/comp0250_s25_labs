@@ -22,6 +22,8 @@ solution is contained within the cw1_team_<your_team_number> package */
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf/tf.h>
+#include <sensor_msgs/Image.h>
+#include <sensor_msgs/CameraInfo.h>
 
 // standard c++ library includes (std::string, std::vector)
 #include <string>
@@ -34,6 +36,20 @@ solution is contained within the cw1_team_<your_team_number> package */
 
 // // include any services created in this package
 // #include "cw1_team_x/example.h"
+
+typedef struct camera_info{
+  float fx;
+  float fy;
+  float cx;
+  float cy;
+  bool info_received = false;
+} camera_info;
+
+typedef struct camera_image{
+  sensor_msgs::Image latest_image;
+  bool image_updated = false;
+  ros::Time last_image_time;
+} camera_image;
 
 class cw1
 {
@@ -51,8 +67,23 @@ public:
   bool 
   moveGripper(float width, float wait_time = 0.0);
 
+  void
+  pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStamped place_point);
+
   void 
   addCollisionBasket(geometry_msgs::Point centre);
+
+  void
+  cameraImgCallback(const sensor_msgs::ImageConstPtr& msg);
+
+  void
+  cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg);
+
+  std::pair<int, int> 
+  getLocOfCameraImage(geometry_msgs::PointStamped basket_loc);
+
+  std::string
+  colorMapping(float r, float g, float b);
 
   // service callbacks for tasks 1, 2, and 3
   bool 
@@ -69,6 +100,9 @@ public:
   void
   task1(geometry_msgs::PoseStamped grasp_pose, geometry_msgs::PointStamped place_point);
 
+  void
+  task2(std::vector<geometry_msgs::PointStamped> basket_locs);
+
   /* ----- class member variables ----- */
 
   ros::NodeHandle nh_;
@@ -80,12 +114,16 @@ public:
   moveit::planning_interface::MoveGroupInterface hand_group_{"hand"};
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
 
-   /** \brief Define some useful constant values. */
-   std::string base_frame_ = "panda_link0";
-   double gripper_open_ = 80e-3;
-   double gripper_closed_ = 0.0;
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
 
+  /** \brief Define some useful constant values. */
+  std::string base_frame_ = "panda_link0";
+  double gripper_open_ = 80e-3;
+  double gripper_closed_ = 0.0;
 
+  camera_info camera_info_;
+  camera_image camera_image_;
 };
 
 #endif // end of include guard for CW1_CLASS_H_

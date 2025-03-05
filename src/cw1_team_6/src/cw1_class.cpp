@@ -9,7 +9,9 @@ bool debug = false;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-cw1::cw1(ros::NodeHandle nh)
+cw1::cw1(ros::NodeHandle nh):
+  tf_buffer_(),
+  tf_listener_(tf_buffer_)
 {
   /* class constructor */
 
@@ -33,10 +35,14 @@ cw1::t1_callback(cw1_world_spawner::Task1Service::Request &request,
   cw1_world_spawner::Task1Service::Response &response) 
 {
   /* function which should solve task 1 */
+  geometry_msgs::PoseStamped pick_pose = request.object_loc;
+  geometry_msgs::PointStamped place_point = request.goal_loc;
 
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
+  
+  addCollisionBasket(place_point.point);
 
-  task1(request.object_loc, request.goal_loc);
+  pickAndPlace(pick_pose, place_point);
 
   ROS_INFO("Task1 completed");
   return true;
@@ -49,8 +55,6 @@ cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
   cw1_world_spawner::Task2Service::Response &response)
 {
   /* function which should solve task 2 */
-
-  ROS_INFO("The coursework solving callback for task 2 has been triggered");
 
   return true;
 }
@@ -147,68 +151,64 @@ cw1::moveGripper(float width, float wait_time)
 }
 
 void
-cw1::task1(geometry_msgs::PoseStamped grasp_pose, geometry_msgs::PointStamped place_point)
+cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStamped place_point)
 {
-  /* function to solve task 1 */
-
-  ROS_INFO("Solving task 1");
-
-  // Echo grasp_pose and place_point
-  if (debug)
-  {
-    ROS_INFO("Grasp pose: x=%f, y=%f, z=%f", grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
-    ROS_INFO("Place point: x=%f, y=%f, z=%f", place_point.point.x, place_point.point.y, place_point.point.z);
-  }
-
   float hand_length = 0.1;
   float gripper_closed = 0.01;
   float gripper_open = 0.045;
-
   geometry_msgs::PoseStamped place_point_pose;
 
-  addCollisionBasket(place_point.point);
+  ROS_INFO("Picking and placing object");
 
   // always consider the griper length
-  grasp_pose.pose.position.z += hand_length;
+  pick_pose.pose.position.z += hand_length;
   place_point.point.z += hand_length;
   place_point_pose.pose.position = place_point.point;
   place_point_pose.pose.orientation = arm_group_.getCurrentPose().pose.orientation;
   place_point_pose.header.frame_id = base_frame_;
 
   // move the arm to top of the grasp point 
-  grasp_pose.pose.orientation = arm_group_.getCurrentPose().pose.orientation;
-  grasp_pose.pose.position.z += 0.1;
-  moveArm(grasp_pose);
+  pick_pose.pose.orientation = arm_group_.getCurrentPose().pose.orientation;
+  pick_pose.pose.position.z += 0.1;
+  moveArm(pick_pose);
 
   moveGripper(gripper_open);
 
-  // move down
-  if (debug)
-  {
-    ROS_INFO("======Moving down to grasp");
-  }
-  grasp_pose.pose.position.z -= 0.095;
-  moveArm(grasp_pose);
+  pick_pose.pose.position.z -= 0.095;
+  moveArm(pick_pose);
 
   // move the gripper to the closed width
   moveGripper(gripper_closed, 4.0);
+
+  ROS_INFO("Object picked up");
 
   // move to top of place point
   place_point_pose.pose.position.z += 0.2;
   // move the arm to the place point
   moveArm(place_point_pose);
 
-  // move down
-  if (debug)
-  {
-    ROS_INFO("=======Moving down to drop");
-  }
-  place_point_pose.pose.position.z -= 0.15;
+  place_point_pose.pose.position.z -= 0.1;
   // move the arm to the place point
   moveArm(place_point_pose);
 
   // move the gripper to the closed width
   moveGripper(gripper_open);
+
+  ROS_INFO("Object placed");
+
+  return;
+}
+
+void
+cw1::task1(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStamped place_point)
+{
+  /* function to solve task 1 */
+
+  ROS_INFO("Solving task 1");
+
+  addCollisionBasket(place_point.point);
+
+  pickAndPlace(pick_pose, place_point);
 
   return;
 }
@@ -220,6 +220,8 @@ cw1::addCollisionBasket(geometry_msgs::Point centre)
   moveit_msgs::CollisionObject basket_bottom;
 
   std::vector<moveit_msgs::CollisionObject> object_vector;
+
+  ROS_INFO("Adding collision basket at x=%f, y=%f, z=%f", centre.x, centre.y, centre.z);
 
   float thickness = 9e-3;
   float length = 0.1;
@@ -285,9 +287,9 @@ cw1::addCollisionBasket(geometry_msgs::Point centre)
       shape_msgs::SolidPrimitive wall_primitive;
       wall_primitive.type = shape_msgs::SolidPrimitive::BOX;
       
-      if (i < 2) {  // 左右侧面
+      if (i < 2) {  
           wall_primitive.dimensions = {thickness, width, height};
-      } else {  // 前后侧面
+      } else {  
           wall_primitive.dimensions = {length, thickness, height};
       }
       
@@ -301,4 +303,60 @@ cw1::addCollisionBasket(geometry_msgs::Point centre)
   planning_scene_interface_.applyCollisionObjects(object_vector);
 
   return;
+}
+
+
+//////// For task2 //////
+void
+cw1::cameraImgCallback(const sensor_msgs::ImageConstPtr& msg)
+{
+  camera_image_.latest_image = *msg;
+  camera_image_.image_updated = true;
+  camera_image_.last_image_time = msg->header.stamp;
+
+  return;
+}
+
+void 
+cw1::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg) 
+{
+  camera_info_.fx = msg->K[0];
+  camera_info_.fy = msg->K[4];
+  camera_info_.cx = msg->K[2];
+  camera_info_.cy = msg->K[5];
+  camera_info_.info_received = true;
+
+  return;
+}
+
+
+std::pair<int, int>
+cw1::getLocOfCameraImage(geometry_msgs::PointStamped basket_loc)
+{
+  
+  geometry_msgs::PointStamped point_in_camera;
+  std::string target_frame = "color";
+  basket_loc.header.stamp = ros::Time(0);
+  
+  tf_buffer_.transform(basket_loc, point_in_camera, target_frame);
+
+  ROS_INFO("Point in camera frame: x=%f, y=%f, z=%f", point_in_camera.point.x, point_in_camera.point.y, point_in_camera.point.z);
+  
+  int u = static_cast<int>((camera_info_.fx * point_in_camera.point.x / point_in_camera.point.z) + camera_info_.cx);
+  int v = static_cast<int>((camera_info_.fy * point_in_camera.point.y / point_in_camera.point.z) + camera_info_.cy);
+  
+  return std::make_pair(u, v);
+}
+
+std::string
+cw1::colorMapping(float r, float g, float b)
+{
+  if (r == 0.1 && g == 0.1 && b == 0.8)
+    return "blue";
+  else if (r == 0.8 && g == 0.1 && b == 0.8)
+    return "purple";
+  else if (r == 0.8 && g == 0.1 && b == 0.1)
+    return "red";
+  else
+    return "none";
 }
