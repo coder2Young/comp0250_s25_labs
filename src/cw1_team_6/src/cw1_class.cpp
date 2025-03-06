@@ -11,20 +11,7 @@ cw1::cw1(ros::NodeHandle nh):
   // Initialise the member variables
   tf_buffer_(),
   tf_listener_(tf_buffer_),
-  cloud_(new pcl::PointCloud<pcl::PointXYZRGBA>),
-  ////////
-  g_cloud_ptr (new PointC), // input point cloud
-  g_cloud_filtered (new PointC), // filtered point cloud
-  g_cloud_filtered2 (new PointC), // filtered point cloud
-  g_cloud_plane (new PointC), // plane point cloud
-  g_cloud_cylinder (new PointC), // cylinder point cloud
-  g_tree_ptr (new pcl::search::KdTree<PointT> ()), // KdTree
-  g_cloud_normals (new pcl::PointCloud<pcl::Normal>), // segmentation
-  g_cloud_normals2 (new pcl::PointCloud<pcl::Normal>), // segmentation
-  g_inliers_plane (new pcl::PointIndices), // plane seg
-  g_inliers_cylinder (new pcl::PointIndices), // cylidenr seg
-  g_coeff_plane (new pcl::ModelCoefficients), // plane coeff
-  g_coeff_cylinder (new pcl::ModelCoefficients), // cylinder coeff
+  cloud_(new PointC),
   debug_ (false)
 {
   /* class constructor */
@@ -54,32 +41,36 @@ cw1::cw1(ros::NodeHandle nh):
     &cw1::depthImgCallback,
     this);
 
-  pub_filtered_cloud_ = nh.advertise<sensor_msgs::PointCloud2>("/filtered_cloud", 1);
+  if (debug_)
+  {
+    pub_filtered_cloud_ = nh.advertise<sensor_msgs::PointCloud2>("/cloud", 1);
+  }
 
-  // Scan position should be in (0.5, 0, MAX_HEIGHT can be achieved)
-  // to make the camera cover the whole table
-  // Init position x=0.557381, y=-0.000013, z=0.612747
-  // Orientation x=0.923953, y=-0.382500, z=-0.001784, w=0.000723
-  
+  cw1Config();
+
   ROS_INFO("cw1 class initialised");
 }
 
 void
-cw1::config()
+cw1::cw1Config()
 {
-  scan_pose_.position.x = 0.35;
+  box_size_ = 0.04;
+  hand_offset_ = 0.1;
+
+  // Define a pose high enough to scan the whole scenario
+  scan_pose_.position.x = 0.37;
   scan_pose_.position.y = 0.0;
-  scan_pose_.position.z = 0.84;
+  scan_pose_.position.z = 0.88;
   scan_pose_.orientation.x = 0.923953;
   scan_pose_.orientation.y = -0.382500;
   scan_pose_.orientation.z = -0.001784;
   scan_pose_.orientation.w = 0.000723;
 
-  // Define public variables
-  g_vg_leaf_sz = 0.01; // VoxelGrid leaf size: Better in a config file
-  g_pt_thrs_min = 0.0; // PassThrough min thres: Better in a config file
-  g_pt_thrs_max = 0.7; // PassThrough max thres: Better in a config file
-  g_k_nn = 50; // Normals nn size: Better in a config file
+  position_precision_ = 1000.0;
+  box_basket_size_thresh_ = 900;
+  cluster_color_thresh_ = 140;
+  cluster_dist_thresh_ = 0.04;
+  min_cluster_thresh_ = 500;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -98,12 +89,12 @@ cw1::t1_callback(cw1_world_spawner::Task1Service::Request &request,
   ROS_INFO("Current pose: x=%f, y=%f, z=%f", current_pose.pose.position.x, current_pose.pose.position.y, current_pose.pose.position.z);
   ROS_INFO("Current orientation: x=%f, y=%f, z=%f, w=%f", current_pose.pose.orientation.x, current_pose.pose.orientation.y, current_pose.pose.orientation.z, current_pose.pose.orientation.w);
 
-
   addCollisionBasket(place_point.point);
 
   pickAndPlace(pick_pose, place_point);
 
   ROS_INFO("Task1 completed");
+
   return true;
 }
 
@@ -126,9 +117,11 @@ cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
       scan_pose_.position.x, scan_pose_.position.y, scan_pose_.position.z);
   moveArm(scan_pose);
 
-  // Wait for the basket to spawn for 3s
-  ros::Duration(3.0).sleep();
+  // Wait for the basket to spawn for 1s
+  ros::Duration(1.0).sleep();
 
+  int image_height = camera_info_.height;
+  int image_width = camera_info_.width;
   // Iterate through potential baskets
   for (int i = 0; i < num_baskets; ++i) {
     geometry_msgs::PointStamped basket_loc = potential_basket_locs[i];
@@ -137,7 +130,7 @@ cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
     ROS_INFO("Basket %d at 2D image coordinate: u=%d, v=%d", i+1, image_loc.first, image_loc.second);
   
     // Check if the basket is in the image
-    if (image_loc.first < 0 || image_loc.first > 640 || image_loc.second < 0 || image_loc.second > 480) {
+    if (image_loc.first < 0 || image_loc.first > image_width || image_loc.second < 0 || image_loc.second > image_height) {
       ROS_WARN("Basket %d not in image", i+1);
       continue;
     }
@@ -188,7 +181,7 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
 
   ROS_INFO("The coursework solving callback for task 3 has been triggered");
 
-  // Move to scan pos
+  // 1. Move to scan pos
   geometry_msgs::PoseStamped scan_pose;
   scan_pose.header.frame_id = base_frame_;
   scan_pose.pose = scan_pose_;
@@ -197,19 +190,105 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
       scan_pose_.position.x, scan_pose_.position.y, scan_pose_.position.z);
   moveArm(scan_pose);
 
-  // regionGrowing(cloud_);
+  // Wait 3s for the basket to spawn
+  ros::Duration(3.0).sleep();
 
-  std::vector<PointCPtr> clusters = regionGrowing(cloud_);
+  // 2. Get PointCloud under base frame
+  PointCPtr cloud_base = transformCloudToBaseFrame(cloud_);
+
+  // 3. Clustering
+  // Use regionGrowing to segment the point cloud
+  // regionGrowing enables both distance and color based segmentation
+  std::vector<PointCPtr> clusters = regionGrowing(cloud_base);
+  clusters = mergeClusters(clusters);
 
   // Log out the number of clusters
   ROS_INFO("Number of clusters: %lu", clusters.size());
 
+  std::map<std::string, geometry_msgs::PointStamped> basket_map;  // 颜色 -> basket 质心
+  std::map<std::string, std::vector<geometry_msgs::PoseStamped>> box_map; // 颜色 -> box pick 位姿
+  for (auto cluster : clusters)
+  {
+    // Compute the centroid of the cluster to pick or place
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*cluster, centroid);
+    geometry_msgs::Point centroid_position;
 
-  // ROS_INFO("Clustering the point cloud");
-  // std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters = clusterPointclouds(cloud_);
+    // Round to 3 decimal places
+    centroid_position.x = std::round(centroid[0] * position_precision_) / position_precision_;
+    centroid_position.y = std::round(centroid[1] * position_precision_) / position_precision_;
+    centroid_position.z = std::round(centroid[2] * position_precision_) / position_precision_;
 
-  // // Log out the number of clusters
-  // ROS_INFO("Number of clusters: %lu", clusters.size());
+    // Pick a random point for color
+    int random_point = rand() % cluster->size();;
+    PointT point = cluster->points[random_point];
+    float r = static_cast<float>(point.r) / 255.0f;
+    float g = static_cast<float>(point.g) / 255.0f;
+    float b = static_cast<float>(point.b) / 255.0f;
+
+    ROS_INFO("==== Cluster info ====");
+    ROS_INFO("Cluster center: x=%.3f, y=%.3f, z=%.3f", centroid_position.x, centroid_position.y, centroid_position.z);
+    ROS_INFO("Cluster color: r=%.3f, g=%.3f, b=%.3f", r, g, b);
+    std::string color_str = colorMapping(r, g, b);
+    ROS_INFO("Cluster color: %s", color_str.c_str());
+    ROS_INFO("Cluster size: %ld", cluster->size());
+    
+    if (cluster->size() < box_basket_size_thresh_)
+    {
+      geometry_msgs::PoseStamped pick_pose;
+      pick_pose.header.frame_id = base_frame_;
+      pick_pose.pose.position.x = centroid_position.x;
+      pick_pose.pose.position.y = centroid_position.y;
+      pick_pose.pose.position.z = centroid_position.z;
+      pick_pose.pose.orientation = arm_group_.getCurrentPose().pose.orientation;
+      box_map[color_str].push_back(pick_pose);
+    }
+    else
+    {
+      geometry_msgs::PointStamped basket_loc;
+      basket_loc.header.frame_id = base_frame_;
+      basket_loc.point = centroid_position;
+      basket_map[color_str] = basket_loc;
+    }
+  }
+
+  // 5. 对每种颜色，若存在 box 且存在 basket，则对所有 box 执行抓取放置
+  for (auto &entry : basket_map)
+  {
+    // Add all basket to the collision scene
+    geometry_msgs::Point basket_loc_point = entry.second.point;
+    addCollisionBasket(basket_loc_point);
+  }
+
+
+  for (auto &entry : box_map)
+  {
+    std::string color = entry.first;
+    const auto &box_poses = entry.second;
+    if (basket_map.find(color) == basket_map.end()) {
+      ROS_WARN("No basket found for color %s; skipping boxes of that color.", color.c_str());
+      continue;
+    }
+    // 对 basket，若有多个 box要放入，考虑堆叠：每放一个 box，放置高度增加 box_size_
+    geometry_msgs::PointStamped basket_loc = basket_map[color];
+    int count = 0;
+    for (const auto &pick_pose : box_poses)
+    {
+      // 构造放置点，初始位置为 basket 质心，加上一个基本的 offset（hand_offset_）和堆叠高度 count * box_size_
+      geometry_msgs::PointStamped place_point;
+      place_point.header.frame_id = base_frame_;
+      place_point.point.x = basket_loc.point.x;
+      place_point.point.y = basket_loc.point.y;
+      place_point.point.z = basket_loc.point.z  + count * box_size_;
+      ROS_INFO("For color %s: picking box at (%.3f, %.3f, %.3f), placing at (%.3f, %.3f, %.3f)",
+              color.c_str(),
+              pick_pose.pose.position.x, pick_pose.pose.position.y, pick_pose.pose.position.z,
+              place_point.point.x, place_point.point.y, place_point.point.z);
+      // 调用 pickAndPlace 进行抓取和放置，抓取时保持当前机械臂位姿
+      pickAndPlace(pick_pose, place_point);
+      ++count;
+    }
+  }
 
   return true;
 }
@@ -222,17 +301,14 @@ cw1::moveArm(geometry_msgs::PoseStamped target_pose)
   ROS_INFO("Moving the arm to the target pose");
 
   // setup the target pose
-  ROS_INFO("Setting pose target");
+  //ROS_INFO("Setting pose target");
   arm_group_.setPoseTarget(target_pose);
 
   // create a movement plan for the arm
-  ROS_INFO("Attempting to plan the path");
+  //ROS_INFO("Attempting to plan the path");
   moveit::planning_interface::MoveGroupInterface::Plan my_plan;
   bool success = (arm_group_.plan(my_plan) ==
     moveit::planning_interface::MoveItErrorCode::SUCCESS);
-
-  // google 'c++ conditional operator' to understand this line
-  ROS_INFO("Visualising plan %s", success ? "" : "FAILED");
 
   // execute the planned path
   arm_group_.move();
@@ -261,7 +337,7 @@ cw1::moveGripper(float width, float wait_time)
   hand_group_.setJointValueTarget(gripperJointTargets);
 
   // move the robot hand
-  ROS_INFO("Attempting to plan the path");
+  //ROS_INFO("Attempting to plan the path");
   moveit::planning_interface::MoveGroupInterface::Plan my_plan;
   bool success = (hand_group_.plan(my_plan) ==
     moveit::planning_interface::MoveItErrorCode::SUCCESS);
@@ -460,138 +536,71 @@ cw1::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg)
 void
 cw1::depthImgCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
 {
-  cloud_.reset(new PointC);
   pcl::fromROSMsg(*msg, *cloud_);
   cloud_frame_id_ = msg->header.frame_id;
-
-  // cloudFiltering(cloud_, g_cloud_filtered);
-
-  // // publish the filtered cloud
-  // sensor_msgs::PointCloud2 cloud_msg;
-  // pcl::toROSMsg(*g_cloud_filtered, cloud_msg);
-  // cloud_msg.header.frame_id = cloud_frame_id_;
-  // pub_filtered_cloud_.publish(cloud_msg);
 
   return;
 }
 
-bool
-cw1::cloudFiltering(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_filtered)
+Color 
+cw1::stringToColor(std::string color) 
 {
-  // Cloud preprocess pipeline
-  pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGBA>);
-  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_downsampled(new pcl::PointCloud<pcl::PointXYZRGBA>);
-  double k_nn = 50;
-  pcl::VoxelGrid<pcl::PointXYZRGBA> voxel;
-  voxel.setInputCloud(cloud);
-  voxel.setLeafSize(0.01f, 0.01f, 0.01f);  // 根据实际情况调节叶子尺寸
-  voxel.filter(*cloud_downsampled);
-
-  // Calcultaing normals
-  pcl::PointCloud<pcl::Normal>::Ptr ne(new pcl::PointCloud<pcl::Normal>);
-  pcl::NormalEstimation<pcl::PointXYZRGBA, pcl::Normal> ne_est;
-  ne_est.setInputCloud(cloud_downsampled);
-  ne_est.setSearchMethod(tree);
-  ne_est.setKSearch(k_nn);
-  ne_est.compute(*ne);
-
-
-  // 设定平面模型分割对象
-  pcl::SACSegmentationFromNormals<PointT, pcl::Normal> seg;
-  seg.setOptimizeCoefficients(true);
-  seg.setModelType(pcl::SACMODEL_PLANE);
-  seg.setMethodType(pcl::SAC_RANSAC);
-  seg.setNormalDistanceWeight (0.1);
-  seg.setInputNormals (ne);
-  seg.setMaxIterations (100);
-  seg.setDistanceThreshold(0.02);  
-  seg.setInputCloud(cloud_downsampled);
-
-  // 获取平面内点（地板）的索引
-  pcl::PointIndices::Ptr floor_inliers(new pcl::PointIndices);
-  pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-  seg.segment(*floor_inliers, *coefficients);
-
-  if (floor_inliers->indices.size() == 0) {
-      ROS_WARN("没有检测到地板平面！");
-      return false;
+  if (color == "red") {
+      return red;
+  } else if (color == "purple") {
+      return purple;
+  } else if (color == "blue") {
+      return blue;
   } else {
-      // 使用 ExtractIndices 去除地板点
-      pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
-      extract.setInputCloud(cloud_downsampled);
-      extract.setIndices(floor_inliers);
-      extract.setNegative(true);  // true 表示提取非平面（物体）
-      extract.filter(*cloud_filtered);
-      return true;
+      return none;
   }
-  // pcl::PassThrough<pcl::PointXYZRGBA> pt;
-  // pt.setInputCloud(cloud_downsampled);
-  // pt.setFilterFieldName("x");
-  // pt.setFilterLimits(-1.0, 1.0);
-  // pt.setFilterFieldName("z");
-  // pt.setFilterLimits(0.0, 0.85); // Remove the ground
-  // pt.filter(*cloud_filtered_);
+}
 
-  return false;
+std::string 
+cw1::colorToString(Color color) 
+{
+  switch (color) {
+      case none:
+          return "none";
+      case red:
+          return "red";
+      case purple:
+          return "purple";
+      case blue:
+          return "blue";
+      default:
+          return "unknown";
+  }
 }
 
 std::vector<PointCPtr>
 cw1::regionGrowing(PointCPtr cloud)
 {
-  // Apply vx to the cloud
-  pcl::VoxelGrid<PointT> vx;
-  vx.setInputCloud(cloud);
-  vx.setLeafSize(0.01f, 0.01f, 0.01f);
-  vx.filter(*cloud);
+  PointCPtr filtered_cloud = filterCloud(cloud);
 
-  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters;
-  pcl::RegionGrowingRGB<pcl::PointXYZRGBA> reg;
-  reg.setInputCloud(cloud); // cloud is a pointcloud pointer
-  reg.setDistanceThreshold(0.05);
-  reg.setPointColorThreshold(6);
-  reg.setRegionColorThreshold(5);
-  reg.setMinClusterSize(600);
+  // Apply vx to the cloud
+  // pcl::VoxelGrid<PointT> vx;
+  // vx.setInputCloud(filtered_cloud);
+  // vx.setLeafSize(0.015f, 0.015f, 0.015f);
+  // vx.filter(*filtered_cloud);
+
+  std::vector<PointCPtr> clusters;
+  std::vector<PointCPtr> merged_clusters;
+  pcl::RegionGrowingRGB<PointT> reg;
+  reg.setInputCloud(filtered_cloud); // cloud is a pointcloud pointer
+  reg.setDistanceThreshold(cluster_dist_thresh_);
+  reg.setPointColorThreshold(cluster_color_thresh_);
+  reg.setRegionColorThreshold(cluster_color_thresh_ + 0.1);
+  reg.setMinClusterSize(min_cluster_thresh_);
   
   std::vector<pcl::PointIndices> clusters_indices;
   reg.extract(clusters_indices);
 
   for (std::vector<pcl::PointIndices>::const_iterator it = clusters_indices.begin (); it != clusters_indices.end (); ++it)
   {
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGBA>);
+    pcl::PointCloud<PointT>::Ptr cloud_cluster (new PointC);
     for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit)
-      cloud_cluster->points.push_back (cloud->points[*pit]); //*
-    cloud_cluster->width = cloud_cluster->points.size ();
-    cloud_cluster->height = 1;
-    cloud_cluster->is_dense = true;
-
-    clusters.push_back(cloud_cluster);
-  }
-
-  return clusters;
-}
-
-std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>
-cw1::clusterPointclouds(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud)
-{
-  // Create the KdTree object for the search method of the extraction
-  pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGBA>);
-  tree->setInputCloud (cloud);
-
-  std::vector<pcl::PointIndices> cluster_indices;
-  pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
-  ec.setClusterTolerance (0.04);
-  ec.setMinClusterSize (100);
-  ec.setMaxClusterSize (25000);
-  ec.setSearchMethod (tree);
-  ec.setInputCloud (cloud);
-  ec.extract (cluster_indices);
-
-  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters;
-  for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it)
-  {
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGBA>);
-    for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit)
-      cloud_cluster->points.push_back (cloud->points[*pit]); //*
+      cloud_cluster->points.push_back (filtered_cloud->points[*pit]); //*
     cloud_cluster->width = cloud_cluster->points.size ();
     cloud_cluster->height = 1;
     cloud_cluster->is_dense = true;
@@ -645,4 +654,107 @@ cw1::colorMapping(float r, float g, float b)
   }
 
   return "none";
+}
+
+PointCPtr
+cw1::filterCloud(PointCPtr cloud)
+{
+  PointCPtr filtered_cloud(new PointC);
+
+  // 遍历点云，对每个点进行颜色过滤
+  for (const auto& pt : cloud->points)
+  {
+      // 归一化颜色值
+      float r = static_cast<float>(pt.r) / 255.0f;
+      float g = static_cast<float>(pt.g) / 255.0f;
+      float b = static_cast<float>(pt.b) / 255.0f;
+
+      // 判断是否在 purple 的范围内
+      bool isPurple = (r > 0.7f && r < 0.9f) &&
+                      (g > 0.0f && g < 0.2f) &&
+                      (b > 0.7f && b < 0.9f);
+
+      // 判断是否在 red 的范围内
+      bool isRed    = (r > 0.7f && r < 0.9f) &&
+                      (g > 0.0f && g < 0.2f) &&
+                      (b > 0.0f && b < 0.2f);
+
+      // 判断是否在 blue 的范围内
+      bool isBlue   = (r > 0.0f && r < 0.2f) &&
+                      (g > 0.0f && g < 0.2f) &&
+                      (b > 0.7f && b < 0.9f);
+
+      // 如果点属于三种颜色中的任一种，则保留
+      if (isPurple || isRed || isBlue)
+      {
+          filtered_cloud->points.push_back(pt);
+      }
+  }
+
+  // 更新点云的尺寸信息（若为非组织点云则 height 设置为 1）
+  filtered_cloud->width = filtered_cloud->points.size();
+  filtered_cloud->height = 1;
+
+  return filtered_cloud;
+}
+
+PointCPtr
+cw1::transformCloudToBaseFrame(PointCPtr cloud_in)
+{
+  // Create a new point cloud
+  PointCPtr cloud_out(new PointC);
+  // Transform the cloud
+  pcl_ros::transformPointCloud(base_frame_, *cloud_, *cloud_out, tf_buffer_);
+
+  return cloud_out;
+}
+
+std::vector<PointCPtr> 
+cw1::mergeClusters(const std::vector<PointCPtr>& clusters)
+{
+  // mergedClusters 最终保存所有合并后的聚类
+  std::vector<PointCPtr> mergedClusters;
+  // 用来记录颜色映射（比如 "red", "blue", "purple"）对应 mergedClusters 中的索引
+  std::map<std::string, size_t> colorMap;
+
+  // 遍历每个聚类
+  for (size_t i = 0; i < clusters.size(); ++i)
+  {
+    PointCPtr cluster = clusters[i];
+
+    // 如果聚类点数大于 merge_size_thresh，则考虑合并同色的聚类
+    if (cluster->size() > box_basket_size_thresh_)
+    {
+      // 选取一个代表点（这里随机选取一个点）
+      int random_index = rand() % cluster->size();
+      PointT point = cluster->points[random_index];
+      float r = static_cast<float>(point.r) / 255.0f;
+      float g = static_cast<float>(point.g) / 255.0f;
+      float b = static_cast<float>(point.b) / 255.0f;
+      std::string colStr = colorMapping(r, g, b);
+
+      // 如果这个颜色还没有在 map 中，新建一个合并聚类
+      if (colorMap.find(colStr) == colorMap.end())
+      {
+        // 新建一个聚类，拷贝当前聚类
+        PointCPtr mergedCluster(new PointC);
+        *mergedCluster += *cluster;
+        mergedClusters.push_back(mergedCluster);
+        colorMap[colStr] = mergedClusters.size() - 1;
+      }
+      else
+      {
+        // 找到已有的聚类，将当前聚类的点合并进去
+        size_t idx = colorMap[colStr];
+        *mergedClusters[idx] += *cluster;
+      }
+    }
+    else
+    {
+      // 对于小聚类，可以不合并，直接加入最终结果
+      mergedClusters.push_back(cluster);
+    }
+  }
+  
+  return mergedClusters;
 }
