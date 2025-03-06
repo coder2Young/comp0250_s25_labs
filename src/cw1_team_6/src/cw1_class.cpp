@@ -10,8 +10,11 @@ bool debug = false;
 ///////////////////////////////////////////////////////////////////////////////
 
 cw1::cw1(ros::NodeHandle nh):
+  // Initialise the member variables
   tf_buffer_(),
-  tf_listener_(tf_buffer_)
+  tf_listener_(tf_buffer_),
+  cloud_(new pcl::PointCloud<pcl::PointXYZRGBA>),
+  cloud_filtered_(new pcl::PointCloud<pcl::PointXYZRGBA>)
 {
   /* class constructor */
 
@@ -25,7 +28,20 @@ cw1::cw1(ros::NodeHandle nh):
   t3_service_  = nh_.advertiseService("/task3_start",
     &cw1::t3_callback, this);
 
-  ROS_INFO("cw1 class initialised");
+  sub_img_ = nh.subscribe ("/r200/camera/color/image_raw",
+    1,
+    &cw1::cameraImgCallback,
+    this);
+
+  sub_img_info_ = nh.subscribe ("/r200/camera/color/camera_info",
+    1,
+    &cw1::cameraInfoCallback,
+    this);
+
+  sub_depth_ = nh.subscribe("/r200/camera/depth_registered/points",
+    1,
+    &cw1::depthImgCallback,
+    this);
 
   // Scan position should be in (0.5, 0, MAX_HEIGHT can be achieved)
   // to make the camera cover the whole table
@@ -38,6 +54,8 @@ cw1::cw1(ros::NodeHandle nh):
   scan_pose_.orientation.y = -0.382500;
   scan_pose_.orientation.z = -0.001784;
   scan_pose_.orientation.w = 0.000723;
+
+  ROS_INFO("cw1 class initialised");
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -92,7 +110,7 @@ cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
     geometry_msgs::PointStamped basket_loc = potential_basket_locs[i];
     std::pair<int, int> image_loc = getLocOfCameraImage(basket_loc);
 
-    ROS_INFO("Basket %d at image location: u=%d, v=%d", i+1, image_loc.first, image_loc.second);
+    ROS_INFO("Basket %d at 2D image coordinate: u=%d, v=%d", i+1, image_loc.first, image_loc.second);
   
     // Check if the basket is in the image
     if (image_loc.first < 0 || image_loc.first > 640 || image_loc.second < 0 || image_loc.second > 480) {
@@ -113,7 +131,7 @@ cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
     float b = color[0] / 255.0;
 
     // Print rgb values
-    ROS_INFO("Basket %d at image location: r=%.3f, g=%.3f, b=%.3f", i+1, r, g, b);
+    ROS_INFO("Basket %d r,g,b: r=%.3f, g=%.3f, b=%.3f", i+1, r, g, b);
 
     std::string basket_colour = colorMapping(r, g, b);
     response.basket_colours.push_back(basket_colour);
@@ -122,6 +140,15 @@ cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
     ROS_INFO("Basket %d/%d: %s", i+1, num_baskets ,basket_colour.c_str());
   }
   ROS_INFO("Task2 completed");
+
+  ROS_INFO("Response message:");
+  std::string response_msg = "";
+  // Show the response msg
+  for (int i = 0; i < num_baskets; ++i) {
+    response_msg += response.basket_colours[i];
+    response_msg += " ";
+  }
+  ROS_INFO("Response message: %s", response_msg.c_str());
 
   return true;
 }
@@ -135,6 +162,20 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
   /* function which should solve task 3 */
 
   ROS_INFO("The coursework solving callback for task 3 has been triggered");
+
+  // Move to scan pos
+  geometry_msgs::PoseStamped scan_pose;
+  scan_pose.header.frame_id = base_frame_;
+  scan_pose.pose = scan_pose_;
+
+  ROS_INFO("Moving to scan pose: x=%f, y=%f, z=%f", 
+      scan_pose_.position.x, scan_pose_.position.y, scan_pose_.position.z);
+  moveArm(scan_pose);
+
+  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters = clusterPointclouds(cloud_filtered_);
+
+  // Log out the number of clusters
+  ROS_INFO("Number of clusters: %lu", clusters.size());
 
   return true;
 }
@@ -264,20 +305,6 @@ cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStam
   return;
 }
 
-void
-cw1::task1(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStamped place_point)
-{
-  /* function to solve task 1 */
-
-  ROS_INFO("Solving task 1");
-
-  addCollisionBasket(place_point.point);
-
-  pickAndPlace(pick_pose, place_point);
-
-  return;
-}
-
 void 
 cw1::addCollisionBasket(geometry_msgs::Point centre)
 {
@@ -396,6 +423,69 @@ cw1::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg)
   return;
 }
 
+void
+cw1::depthImgCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
+{
+  cloud_.reset(new pcl::PointCloud<pcl::PointXYZRGBA>);
+  pcl::fromROSMsg(*msg, *cloud_);
+  cloudFiltering();
+
+  // Validate the cloud
+  if (cloud_->points.size() == 0) {
+    ROS_WARN("Cloud is empty");
+  }
+  if (cloud_filtered_->points.size() == 0) {
+    ROS_WARN("Filtered cloud is empty");
+  }
+
+  return;
+}
+
+void
+cw1::cloudFiltering()
+{
+  pcl::PassThrough<pcl::PointXYZRGBA> pt;
+  pt.setInputCloud(cloud_);
+  pt.setFilterFieldName("x");
+  pt.setFilterLimits(-1.0, 1.0);
+  pt.setFilterFieldName("z");
+  pt.setFilterLimits(0.0, 0.77);
+  pt.filter(*cloud_filtered_);
+
+  return;
+}
+
+std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>
+cw1::clusterPointclouds(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud)
+{
+  // Create the KdTree object for the search method of the extraction
+  pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGBA>);
+  tree->setInputCloud (cloud);
+
+  std::vector<pcl::PointIndices> cluster_indices;
+  pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
+  ec.setClusterTolerance (0.02);
+  ec.setMinClusterSize (100);
+  ec.setMaxClusterSize (25000);
+  ec.setSearchMethod (tree);
+  ec.setInputCloud (cloud);
+  ec.extract (cluster_indices);
+
+  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters;
+  for (std::vector<pcl::PointIndices>::const_iterator it = cluster_indices.begin (); it != cluster_indices.end (); ++it)
+  {
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGBA>);
+    for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit)
+      cloud_cluster->points.push_back (cloud->points[*pit]); //*
+    cloud_cluster->width = cloud_cluster->points.size ();
+    cloud_cluster->height = 1;
+    cloud_cluster->is_dense = true;
+
+    clusters.push_back(cloud_cluster);
+  }
+
+  return clusters;
+}
 
 std::pair<int, int>
 cw1::getLocOfCameraImage(geometry_msgs::PointStamped basket_loc)

@@ -30,6 +30,12 @@ int main(int argc, char **argv){
                 &cw1::cameraInfoCallback,
                 &cw_class);
 
+  ros::Subscriber sub_depth = 
+                nh.subscribe("/r200/camera/depth_registered/points",
+                1,
+                &cw1::depthImgCallback,
+                &cw_class);
+
   ros::Rate loop_rate(10);
 
   while (ros::ok()){

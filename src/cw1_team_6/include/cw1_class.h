@@ -24,8 +24,25 @@ solution is contained within the cw1_team_<your_team_number> package */
 #include <tf/tf.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/CameraInfo.h>
+#include <sensor_msgs/PointCloud2.h>
 #include <opencv2/opencv.hpp>
 #include <cv_bridge/cv_bridge.h>
+// PCL specific includes
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/common/centroid.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/extract_indices.h>
+#include <pcl/features/normal_3d.h>
+#include <pcl/ModelCoefficients.h>
+#include <pcl/sample_consensus/method_types.h>
+#include <pcl/sample_consensus/model_types.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/segmentation/extract_clusters.h>
+#include <pcl/io/pcd_io.h>
 
 // standard c++ library includes (std::string, std::vector)
 #include <string>
@@ -64,7 +81,7 @@ public:
   // constructor
   cw1(ros::NodeHandle nh);
 
-  // util functions
+  // Util functions
   bool
   moveArm(geometry_msgs::PoseStamped target_pose);
 
@@ -77,17 +94,27 @@ public:
   void 
   addCollisionBasket(geometry_msgs::Point centre);
 
+  std::pair<int, int> 
+  getLocOfCameraImage(geometry_msgs::PointStamped basket_loc);
+
+  std::string
+  colorMapping(float r, float g, float b);
+
+  void
+  cloudFiltering();
+
+  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>
+  clusterPointclouds(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud);
+
+  // Sensor callbacks
   void
   cameraImgCallback(const sensor_msgs::ImageConstPtr& msg);
 
   void
   cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg);
 
-  std::pair<int, int> 
-  getLocOfCameraImage(geometry_msgs::PointStamped basket_loc);
-
-  std::string
-  colorMapping(float r, float g, float b);
+  void
+  depthImgCallback(const sensor_msgs::PointCloud2ConstPtr& msg);
 
   // service callbacks for tasks 1, 2, and 3
   bool 
@@ -99,13 +126,6 @@ public:
   bool 
   t3_callback(cw1_world_spawner::Task3Service::Request &request,
     cw1_world_spawner::Task3Service::Response &response);
-
-  // implement for callback
-  void
-  task1(geometry_msgs::PoseStamped grasp_pose, geometry_msgs::PointStamped place_point);
-
-  void
-  task2(std::vector<geometry_msgs::PointStamped> basket_locs);
 
   /* ----- class member variables ----- */
 
@@ -121,6 +141,10 @@ public:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 
+  ros::Subscriber sub_img_;
+  ros::Subscriber sub_img_info_;
+  ros::Subscriber sub_depth_;
+
   /** \brief Define some useful constant values. */
   std::string base_frame_ = "panda_link0";
   double gripper_open_ = 80e-3;
@@ -130,6 +154,9 @@ public:
 
   camera_info camera_info_;
   camera_image camera_image_;
+
+  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_;
+  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_filtered_;
 };
 
 #endif // end of include guard for CW1_CLASS_H_
