@@ -22,9 +22,11 @@ solution is contained within the cw1_team_<your_team_number> package */
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf/tf.h>
+// Camera specific includes
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/PointCloud2.h>
+// OpenCV specific includes
 #include <opencv2/opencv.hpp>
 #include <cv_bridge/cv_bridge.h>
 // PCL specific includes
@@ -32,19 +34,8 @@ solution is contained within the cw1_team_<your_team_number> package */
 #include <pcl/common/centroid.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/passthrough.h>
 #include <pcl/filters/extract_indices.h>
-#include <pcl/features/normal_3d.h>
-#include <pcl/ModelCoefficients.h>
-#include <pcl/sample_consensus/method_types.h>
-#include <pcl/sample_consensus/model_types.h>
-#include <pcl/search/kdtree.h>
-#include <pcl/segmentation/sac_segmentation.h>
-#include <pcl/segmentation/extract_clusters.h>
-#include <pcl/io/pcd_io.h>
 #include <pcl_ros/transforms.h>
-
 #include <pcl/segmentation/region_growing_rgb.h>
 
 // standard c++ library includes (std::string, std::vector)
@@ -114,15 +105,6 @@ public:
   std::pair<int, int> 
   getLocOfCameraImage(geometry_msgs::PointStamped basket_loc);
 
-  std::string
-  colorMapping(float r, float g, float b);
-
-  bool
-  cloudFiltering(PointCPtr cloud, PointCPtr cloud_filtered);
-
-  std::vector<PointCPtr>
-  clusterPointclouds(PointCPtr cloud);
-
   // Sensor callbacks
   void
   cameraImgCallback(const sensor_msgs::ImageConstPtr& msg);
@@ -136,6 +118,10 @@ public:
   std::vector<PointCPtr>
   regionGrowing(PointCPtr cloud);
 
+  // Color Related Function
+  static std::string
+  colorMapping(float r, float g, float b);
+
   static std::string
   colorToString(Color color);
 
@@ -143,7 +129,7 @@ public:
   stringToColor(std::string color);
 
   PointCPtr
-  filterCloud(PointCPtr cloud);
+  filterCloudWithColor(PointCPtr cloud);
 
   PointCPtr
   transformCloudToBaseFrame(PointCPtr cloud_in);
@@ -171,9 +157,6 @@ public:
 
   bool debug_ = false;
 
-  float box_size_;
-  float hand_offset_;
-
   moveit::planning_interface::MoveGroupInterface arm_group_{"panda_arm"};
   moveit::planning_interface::MoveGroupInterface hand_group_{"hand"};
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
@@ -188,8 +171,15 @@ public:
 
   /** \brief Define some useful constant values. */
   std::string base_frame_ = "panda_link0";
-  double gripper_open_ = 80e-3;
-  double gripper_closed_ = 0.0;
+  double gripper_open_;
+  double gripper_closed_;
+  float grasp_stanby_height_;
+
+  float box_size_;
+  float basket_size_;
+  float hand_offset_;
+
+  geometry_msgs::Quaternion grasp_orientation_;
 
   geometry_msgs::Pose scan_pose_;
 

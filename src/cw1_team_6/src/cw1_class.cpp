@@ -55,22 +55,29 @@ void
 cw1::cw1Config()
 {
   box_size_ = 0.04;
-  hand_offset_ = 0.1;
+  basket_size_ = 0.1;
+  hand_offset_ = 0.09;
+
+  gripper_open_ = box_size_ + 1e-2;
+  gripper_closed_ = 0.0;
+  
+  grasp_orientation_.x = 0.923953;
+  grasp_orientation_.y = -0.382500;
+  grasp_orientation_.z = -0.001784;
+  grasp_orientation_.w = 0.000723;
 
   // Define a pose high enough to scan the whole scenario
   scan_pose_.position.x = 0.37;
   scan_pose_.position.y = 0.0;
   scan_pose_.position.z = 0.88;
-  scan_pose_.orientation.x = 0.923953;
-  scan_pose_.orientation.y = -0.382500;
-  scan_pose_.orientation.z = -0.001784;
-  scan_pose_.orientation.w = 0.000723;
-
+  scan_pose_.orientation = grasp_orientation_;
+  
   position_precision_ = 1000.0;
   box_basket_size_thresh_ = 900;
   cluster_color_thresh_ = 140;
   cluster_dist_thresh_ = 0.04;
-  min_cluster_thresh_ = 500;
+  min_cluster_thresh_ = 200;
+  grasp_stanby_height_ = 0.1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -190,8 +197,8 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
       scan_pose_.position.x, scan_pose_.position.y, scan_pose_.position.z);
   moveArm(scan_pose);
 
-  // Wait 3s for the basket to spawn
-  ros::Duration(3.0).sleep();
+  // Wait 1s for the basket to spawn
+  ros::Duration(1.0).sleep();
 
   // 2. Get PointCloud under base frame
   PointCPtr cloud_base = transformCloudToBaseFrame(cloud_);
@@ -239,7 +246,7 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
       pick_pose.header.frame_id = base_frame_;
       pick_pose.pose.position.x = centroid_position.x;
       pick_pose.pose.position.y = centroid_position.y;
-      pick_pose.pose.position.z = centroid_position.z;
+      pick_pose.pose.position.z = centroid_position.z - box_size_ / 2.0;
       pick_pose.pose.orientation = arm_group_.getCurrentPose().pose.orientation;
       box_map[color_str].push_back(pick_pose);
     }
@@ -251,6 +258,10 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
       basket_map[color_str] = basket_loc;
     }
   }
+
+  // Log out num of box and basket
+  ROS_INFO("Number of boxes: %lu", box_map.size());
+  ROS_INFO("Number of baskets: %lu", basket_map.size());
 
   // 5. 对每种颜色，若存在 box 且存在 basket，则对所有 box 执行抓取放置
   for (auto &entry : basket_map)
@@ -279,7 +290,7 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
       place_point.header.frame_id = base_frame_;
       place_point.point.x = basket_loc.point.x;
       place_point.point.y = basket_loc.point.y;
-      place_point.point.z = basket_loc.point.z  + count * box_size_;
+      place_point.point.z = basket_loc.point.z + count * box_size_;
       ROS_INFO("For color %s: picking box at (%.3f, %.3f, %.3f), placing at (%.3f, %.3f, %.3f)",
               color.c_str(),
               pick_pose.pose.position.x, pick_pose.pose.position.y, pick_pose.pose.position.z,
@@ -369,46 +380,51 @@ cw1::moveGripper(float width, float wait_time)
 void
 cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStamped place_point)
 {
-  float hand_length = 0.1;
-  float gripper_closed = 0.01;
-  float gripper_open = 0.045;
   geometry_msgs::PoseStamped place_point_pose;
 
   ROS_INFO("Picking and placing object");
 
   // always consider the griper length
-  pick_pose.pose.position.z += hand_length;
-  place_point.point.z += hand_length;
+  pick_pose.pose.position.z += hand_offset_;
+
+  place_point.point.z += hand_offset_;
   place_point_pose.pose.position = place_point.point;
-  place_point_pose.pose.orientation = arm_group_.getCurrentPose().pose.orientation;
+  place_point_pose.pose.orientation = grasp_orientation_;
   place_point_pose.header.frame_id = base_frame_;
 
   // move the arm to top of the grasp point 
-  pick_pose.pose.orientation = arm_group_.getCurrentPose().pose.orientation;
-  pick_pose.pose.position.z += 0.1;
+  pick_pose.pose.orientation = grasp_orientation_;
+  pick_pose.pose.position.z += grasp_stanby_height_;
   moveArm(pick_pose);
 
-  moveGripper(gripper_open);
+  moveGripper(gripper_open_);
 
-  pick_pose.pose.position.z -= 0.095;
+  pick_pose.pose.position.z -= hand_offset_;
   moveArm(pick_pose);
 
   // move the gripper to the closed width
-  moveGripper(gripper_closed, 4.0);
+  moveGripper(gripper_closed_);
+
+  // Wait 0.5s for the gripper to close
+  ros::Duration(0.5).sleep();
+
+  pick_pose.pose.position.z += grasp_stanby_height_;
+  moveArm(pick_pose);
 
   ROS_INFO("Object picked up");
 
   // move to top of place point
-  place_point_pose.pose.position.z += 0.2;
+  // 0.1m higher for safety
+  place_point_pose.pose.position.z += grasp_stanby_height_ + 0.1;
   // move the arm to the place point
   moveArm(place_point_pose);
 
-  place_point_pose.pose.position.z -= 0.1;
+  place_point_pose.pose.position.z -= grasp_stanby_height_;
   // move the arm to the place point
   moveArm(place_point_pose);
 
   // move the gripper to the closed width
-  moveGripper(gripper_open);
+  moveGripper(gripper_open_);
 
   ROS_INFO("Object placed");
 
@@ -426,9 +442,9 @@ cw1::addCollisionBasket(geometry_msgs::Point centre)
   ROS_INFO("Adding collision basket at x=%f, y=%f, z=%f", centre.x, centre.y, centre.z);
 
   float thickness = 9e-3;
-  float length = 0.1;
-  float width = 0.1;
-  float height = 0.1;
+  float length = basket_size_;
+  float width = basket_size_;
+  float height = basket_size_;
   
   // input header information
   basket_bottom.id = "basket_bottm";
@@ -453,7 +469,6 @@ cw1::addCollisionBasket(geometry_msgs::Point centre)
 
   // add the collision object to the vector, then apply to planning scene
   object_vector.push_back(basket_bottom);
-
 
   std::vector<geometry_msgs::Pose> wall_poses;
   geometry_msgs::Pose pose;
@@ -576,7 +591,7 @@ cw1::colorToString(Color color)
 std::vector<PointCPtr>
 cw1::regionGrowing(PointCPtr cloud)
 {
-  PointCPtr filtered_cloud = filterCloud(cloud);
+  PointCPtr filtered_cloud = filterCloudWithColor(cloud);
 
   // Apply vx to the cloud
   // pcl::VoxelGrid<PointT> vx;
@@ -657,7 +672,7 @@ cw1::colorMapping(float r, float g, float b)
 }
 
 PointCPtr
-cw1::filterCloud(PointCPtr cloud)
+cw1::filterCloudWithColor(PointCPtr cloud)
 {
   PointCPtr filtered_cloud(new PointC);
 
