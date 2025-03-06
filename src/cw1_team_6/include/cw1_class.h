@@ -44,6 +44,8 @@ solution is contained within the cw1_team_<your_team_number> package */
 #include <pcl/segmentation/extract_clusters.h>
 #include <pcl/io/pcd_io.h>
 
+#include <pcl/segmentation/region_growing_rgb.h>
+
 // standard c++ library includes (std::string, std::vector)
 #include <string>
 #include <vector>
@@ -55,6 +57,10 @@ solution is contained within the cw1_team_<your_team_number> package */
 
 // // include any services created in this package
 // #include "cw1_team_x/example.h"
+
+typedef pcl::PointXYZRGBA PointT;
+typedef pcl::PointCloud<PointT> PointC;
+typedef PointC::Ptr PointCPtr;
 
 typedef struct camera_info{
   int height;
@@ -81,6 +87,9 @@ public:
   // constructor
   cw1(ros::NodeHandle nh);
 
+  void
+  config();
+
   // Util functions
   bool
   moveArm(geometry_msgs::PoseStamped target_pose);
@@ -100,11 +109,11 @@ public:
   std::string
   colorMapping(float r, float g, float b);
 
-  void
-  cloudFiltering();
+  bool
+  cloudFiltering(PointCPtr cloud, PointCPtr cloud_filtered);
 
-  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>
-  clusterPointclouds(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud);
+  std::vector<PointCPtr>
+  clusterPointclouds(PointCPtr cloud);
 
   // Sensor callbacks
   void
@@ -116,6 +125,9 @@ public:
   void
   depthImgCallback(const sensor_msgs::PointCloud2ConstPtr& msg);
 
+
+  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>
+  regionGrowing(PointCPtr cloud);
   // service callbacks for tasks 1, 2, and 3
   bool 
   t1_callback(cw1_world_spawner::Task1Service::Request &request,
@@ -134,6 +146,8 @@ public:
   ros::ServiceServer t2_service_;
   ros::ServiceServer t3_service_;
 
+  bool debug_ = false;
+
   moveit::planning_interface::MoveGroupInterface arm_group_{"panda_arm"};
   moveit::planning_interface::MoveGroupInterface hand_group_{"hand"};
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
@@ -144,6 +158,7 @@ public:
   ros::Subscriber sub_img_;
   ros::Subscriber sub_img_info_;
   ros::Subscriber sub_depth_;
+  ros::Publisher pub_filtered_cloud_;
 
   /** \brief Define some useful constant values. */
   std::string base_frame_ = "panda_link0";
@@ -155,8 +170,76 @@ public:
   camera_info camera_info_;
   camera_image camera_image_;
 
-  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_;
-  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_filtered_;
+  std::string cloud_frame_id_;
+  PointCPtr cloud_;
+
+  ////////
+  /** \brief ROS geometry message point. */
+  geometry_msgs::PointStamped g_cyl_pt_msg;
+    
+  /** \brief ROS pose publishers. */
+  ros::Publisher g_pub_pose;
+  
+  /** \brief Voxel Grid filter's leaf size. */
+  double g_vg_leaf_sz;
+  
+  /** \brief Point Cloud (input) pointer. */
+  PointCPtr g_cloud_ptr;
+  
+  /** \brief Point Cloud (filtered) pointer. */
+  PointCPtr g_cloud_filtered, g_cloud_filtered2;
+  
+  /** \brief Point Cloud (filtered) sensros_msg for publ. */
+  sensor_msgs::PointCloud2 g_cloud_filtered_msg;
+  
+  /** \brief Point Cloud (input). */
+  pcl::PCLPointCloud2 g_pcl_pc;
+  
+  /** \brief Voxel Grid filter. */
+  pcl::VoxelGrid<PointT> g_vx;
+  
+  /** \brief Pass Through filter. */
+  pcl::PassThrough<PointT> g_pt;
+  
+  /** \brief Pass Through min and max threshold sizes. */
+  double g_pt_thrs_min, g_pt_thrs_max;
+  
+  /** \brief KDTree for nearest neighborhood search. */
+  pcl::search::KdTree<PointT>::Ptr g_tree_ptr;
+  
+  /** \brief Normal estimation. */
+  pcl::NormalEstimation<PointT, pcl::Normal> g_ne;
+  
+  /** \brief Cloud of normals. */
+  pcl::PointCloud<pcl::Normal>::Ptr g_cloud_normals, g_cloud_normals2;
+  
+  /** \brief Nearest neighborhooh size for normal estimation. */
+  double g_k_nn;
+  
+  /** \brief SAC segmentation. */
+  pcl::SACSegmentationFromNormals<PointT, pcl::Normal> g_seg; 
+  
+  /** \brief Extract point cloud indices. */
+  pcl::ExtractIndices<PointT> g_extract_pc;
+
+  /** \brief Extract point cloud normal indices. */
+  pcl::ExtractIndices<pcl::Normal> g_extract_normals;
+  
+  /** \brief Point indices for plane. */
+  pcl::PointIndices::Ptr g_inliers_plane;
+    
+  /** \brief Point indices for cylinder. */
+  pcl::PointIndices::Ptr g_inliers_cylinder;
+  
+  /** \brief Model coefficients for the plane segmentation. */
+  pcl::ModelCoefficients::Ptr g_coeff_plane;
+  
+  /** \brief Model coefficients for the culinder segmentation. */
+  pcl::ModelCoefficients::Ptr g_coeff_cylinder;
+  
+  /** \brief Point cloud to hold plane and cylinder points. */
+  PointCPtr g_cloud_plane, g_cloud_cylinder;
+  
 };
 
 #endif // end of include guard for CW1_CLASS_H_

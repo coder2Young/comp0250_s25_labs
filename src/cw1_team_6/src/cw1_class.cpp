@@ -5,8 +5,6 @@ solution is contained within the cw1_team_<your_team_number> package */
 
 #include <cw1_class.h>
 
-bool debug = false;
-
 ///////////////////////////////////////////////////////////////////////////////
 
 cw1::cw1(ros::NodeHandle nh):
@@ -14,7 +12,20 @@ cw1::cw1(ros::NodeHandle nh):
   tf_buffer_(),
   tf_listener_(tf_buffer_),
   cloud_(new pcl::PointCloud<pcl::PointXYZRGBA>),
-  cloud_filtered_(new pcl::PointCloud<pcl::PointXYZRGBA>)
+  ////////
+  g_cloud_ptr (new PointC), // input point cloud
+  g_cloud_filtered (new PointC), // filtered point cloud
+  g_cloud_filtered2 (new PointC), // filtered point cloud
+  g_cloud_plane (new PointC), // plane point cloud
+  g_cloud_cylinder (new PointC), // cylinder point cloud
+  g_tree_ptr (new pcl::search::KdTree<PointT> ()), // KdTree
+  g_cloud_normals (new pcl::PointCloud<pcl::Normal>), // segmentation
+  g_cloud_normals2 (new pcl::PointCloud<pcl::Normal>), // segmentation
+  g_inliers_plane (new pcl::PointIndices), // plane seg
+  g_inliers_cylinder (new pcl::PointIndices), // cylidenr seg
+  g_coeff_plane (new pcl::ModelCoefficients), // plane coeff
+  g_coeff_cylinder (new pcl::ModelCoefficients), // cylinder coeff
+  debug_ (false)
 {
   /* class constructor */
 
@@ -43,10 +54,19 @@ cw1::cw1(ros::NodeHandle nh):
     &cw1::depthImgCallback,
     this);
 
+  pub_filtered_cloud_ = nh.advertise<sensor_msgs::PointCloud2>("/filtered_cloud", 1);
+
   // Scan position should be in (0.5, 0, MAX_HEIGHT can be achieved)
   // to make the camera cover the whole table
   // Init position x=0.557381, y=-0.000013, z=0.612747
   // Orientation x=0.923953, y=-0.382500, z=-0.001784, w=0.000723
+  
+  ROS_INFO("cw1 class initialised");
+}
+
+void
+cw1::config()
+{
   scan_pose_.position.x = 0.35;
   scan_pose_.position.y = 0.0;
   scan_pose_.position.z = 0.84;
@@ -55,7 +75,11 @@ cw1::cw1(ros::NodeHandle nh):
   scan_pose_.orientation.z = -0.001784;
   scan_pose_.orientation.w = 0.000723;
 
-  ROS_INFO("cw1 class initialised");
+  // Define public variables
+  g_vg_leaf_sz = 0.01; // VoxelGrid leaf size: Better in a config file
+  g_pt_thrs_min = 0.0; // PassThrough min thres: Better in a config file
+  g_pt_thrs_max = 0.7; // PassThrough max thres: Better in a config file
+  g_k_nn = 50; // Normals nn size: Better in a config file
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -160,6 +184,7 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
   cw1_world_spawner::Task3Service::Response &response)
 {
   /* function which should solve task 3 */
+  bool success = false;
 
   ROS_INFO("The coursework solving callback for task 3 has been triggered");
 
@@ -172,10 +197,19 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
       scan_pose_.position.x, scan_pose_.position.y, scan_pose_.position.z);
   moveArm(scan_pose);
 
-  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters = clusterPointclouds(cloud_filtered_);
+  // regionGrowing(cloud_);
+
+  std::vector<PointCPtr> clusters = regionGrowing(cloud_);
 
   // Log out the number of clusters
   ROS_INFO("Number of clusters: %lu", clusters.size());
+
+
+  // ROS_INFO("Clustering the point cloud");
+  // std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters = clusterPointclouds(cloud_);
+
+  // // Log out the number of clusters
+  // ROS_INFO("Number of clusters: %lu", clusters.size());
 
   return true;
 }
@@ -426,33 +460,114 @@ cw1::cameraInfoCallback(const sensor_msgs::CameraInfo::ConstPtr& msg)
 void
 cw1::depthImgCallback(const sensor_msgs::PointCloud2ConstPtr& msg)
 {
-  cloud_.reset(new pcl::PointCloud<pcl::PointXYZRGBA>);
+  cloud_.reset(new PointC);
   pcl::fromROSMsg(*msg, *cloud_);
-  cloudFiltering();
+  cloud_frame_id_ = msg->header.frame_id;
 
-  // Validate the cloud
-  if (cloud_->points.size() == 0) {
-    ROS_WARN("Cloud is empty");
-  }
-  if (cloud_filtered_->points.size() == 0) {
-    ROS_WARN("Filtered cloud is empty");
-  }
+  // cloudFiltering(cloud_, g_cloud_filtered);
+
+  // // publish the filtered cloud
+  // sensor_msgs::PointCloud2 cloud_msg;
+  // pcl::toROSMsg(*g_cloud_filtered, cloud_msg);
+  // cloud_msg.header.frame_id = cloud_frame_id_;
+  // pub_filtered_cloud_.publish(cloud_msg);
 
   return;
 }
 
-void
-cw1::cloudFiltering()
+bool
+cw1::cloudFiltering(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud, pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_filtered)
 {
-  pcl::PassThrough<pcl::PointXYZRGBA> pt;
-  pt.setInputCloud(cloud_);
-  pt.setFilterFieldName("x");
-  pt.setFilterLimits(-1.0, 1.0);
-  pt.setFilterFieldName("z");
-  pt.setFilterLimits(0.0, 0.77);
-  pt.filter(*cloud_filtered_);
+  // Cloud preprocess pipeline
+  pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr tree (new pcl::search::KdTree<pcl::PointXYZRGBA>);
+  pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_downsampled(new pcl::PointCloud<pcl::PointXYZRGBA>);
+  double k_nn = 50;
+  pcl::VoxelGrid<pcl::PointXYZRGBA> voxel;
+  voxel.setInputCloud(cloud);
+  voxel.setLeafSize(0.01f, 0.01f, 0.01f);  // 根据实际情况调节叶子尺寸
+  voxel.filter(*cloud_downsampled);
 
-  return;
+  // Calcultaing normals
+  pcl::PointCloud<pcl::Normal>::Ptr ne(new pcl::PointCloud<pcl::Normal>);
+  pcl::NormalEstimation<pcl::PointXYZRGBA, pcl::Normal> ne_est;
+  ne_est.setInputCloud(cloud_downsampled);
+  ne_est.setSearchMethod(tree);
+  ne_est.setKSearch(k_nn);
+  ne_est.compute(*ne);
+
+
+  // 设定平面模型分割对象
+  pcl::SACSegmentationFromNormals<PointT, pcl::Normal> seg;
+  seg.setOptimizeCoefficients(true);
+  seg.setModelType(pcl::SACMODEL_PLANE);
+  seg.setMethodType(pcl::SAC_RANSAC);
+  seg.setNormalDistanceWeight (0.1);
+  seg.setInputNormals (ne);
+  seg.setMaxIterations (100);
+  seg.setDistanceThreshold(0.02);  
+  seg.setInputCloud(cloud_downsampled);
+
+  // 获取平面内点（地板）的索引
+  pcl::PointIndices::Ptr floor_inliers(new pcl::PointIndices);
+  pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+  seg.segment(*floor_inliers, *coefficients);
+
+  if (floor_inliers->indices.size() == 0) {
+      ROS_WARN("没有检测到地板平面！");
+      return false;
+  } else {
+      // 使用 ExtractIndices 去除地板点
+      pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
+      extract.setInputCloud(cloud_downsampled);
+      extract.setIndices(floor_inliers);
+      extract.setNegative(true);  // true 表示提取非平面（物体）
+      extract.filter(*cloud_filtered);
+      return true;
+  }
+  // pcl::PassThrough<pcl::PointXYZRGBA> pt;
+  // pt.setInputCloud(cloud_downsampled);
+  // pt.setFilterFieldName("x");
+  // pt.setFilterLimits(-1.0, 1.0);
+  // pt.setFilterFieldName("z");
+  // pt.setFilterLimits(0.0, 0.85); // Remove the ground
+  // pt.filter(*cloud_filtered_);
+
+  return false;
+}
+
+std::vector<PointCPtr>
+cw1::regionGrowing(PointCPtr cloud)
+{
+  // Apply vx to the cloud
+  pcl::VoxelGrid<PointT> vx;
+  vx.setInputCloud(cloud);
+  vx.setLeafSize(0.01f, 0.01f, 0.01f);
+  vx.filter(*cloud);
+
+  std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr> clusters;
+  pcl::RegionGrowingRGB<pcl::PointXYZRGBA> reg;
+  reg.setInputCloud(cloud); // cloud is a pointcloud pointer
+  reg.setDistanceThreshold(0.05);
+  reg.setPointColorThreshold(6);
+  reg.setRegionColorThreshold(5);
+  reg.setMinClusterSize(600);
+  
+  std::vector<pcl::PointIndices> clusters_indices;
+  reg.extract(clusters_indices);
+
+  for (std::vector<pcl::PointIndices>::const_iterator it = clusters_indices.begin (); it != clusters_indices.end (); ++it)
+  {
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster (new pcl::PointCloud<pcl::PointXYZRGBA>);
+    for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit)
+      cloud_cluster->points.push_back (cloud->points[*pit]); //*
+    cloud_cluster->width = cloud_cluster->points.size ();
+    cloud_cluster->height = 1;
+    cloud_cluster->is_dense = true;
+
+    clusters.push_back(cloud_cluster);
+  }
+
+  return clusters;
 }
 
 std::vector<pcl::PointCloud<pcl::PointXYZRGBA>::Ptr>
@@ -464,7 +579,7 @@ cw1::clusterPointclouds(pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud)
 
   std::vector<pcl::PointIndices> cluster_indices;
   pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
-  ec.setClusterTolerance (0.02);
+  ec.setClusterTolerance (0.04);
   ec.setMinClusterSize (100);
   ec.setMaxClusterSize (25000);
   ec.setSearchMethod (tree);
