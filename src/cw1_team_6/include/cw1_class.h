@@ -102,6 +102,12 @@ public:
   void 
   addCollisionBasket(geometry_msgs::Point centre);
 
+  void
+  addCollitionGround();
+
+  void
+  clearCollisionObject();
+
   std::pair<int, int> 
   getLocOfCameraImage(geometry_msgs::PointStamped basket_loc);
 
@@ -141,11 +147,25 @@ public:
   bool 
   t1_callback(cw1_world_spawner::Task1Service::Request &request,
     cw1_world_spawner::Task1Service::Response &response);
+
+  bool
+  t1_process(cw1_world_spawner::Task1Service::Request &request,
+  cw1_world_spawner::Task1Service::Response &response);
+
   bool 
   t2_callback(cw1_world_spawner::Task2Service::Request &request,
     cw1_world_spawner::Task2Service::Response &response);
+
+  bool 
+  t2_process(cw1_world_spawner::Task2Service::Request &request,
+    cw1_world_spawner::Task2Service::Response &response);
+
   bool 
   t3_callback(cw1_world_spawner::Task3Service::Request &request,
+    cw1_world_spawner::Task3Service::Response &response);
+
+  bool 
+  t3_process(cw1_world_spawner::Task3Service::Request &request,
     cw1_world_spawner::Task3Service::Response &response);
 
   /* ----- class member variables ----- */
@@ -174,10 +194,15 @@ public:
   double gripper_open_;
   double gripper_closed_;
   float grasp_stanby_height_;
+  float place_stanby_height_;
 
   float box_size_;
   float basket_size_;
   float hand_offset_;
+  float ground_width_;
+  float ground_length_;
+
+  std::vector<moveit_msgs::CollisionObject> collision_object_vector_;
 
   geometry_msgs::Quaternion grasp_orientation_;
 
@@ -193,7 +218,6 @@ public:
   float cluster_color_thresh_ ;
   float cluster_dist_thresh_;
   int min_cluster_thresh_;
-  float post_cluster_dist_thresh_;
 };
 
 #endif // end of include guard for CW1_CLASS_H_

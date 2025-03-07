@@ -12,6 +12,7 @@ cw1::cw1(ros::NodeHandle nh):
   tf_buffer_(),
   tf_listener_(tf_buffer_),
   cloud_(new PointC),
+  collision_object_vector_(),
   debug_ (false)
 {
   /* class constructor */
@@ -56,10 +57,13 @@ cw1::cw1Config()
 {
   box_size_ = 0.04;
   basket_size_ = 0.1;
-  hand_offset_ = 0.09;
-
-  gripper_open_ = box_size_ + 1e-2;
+  hand_offset_ = 0.11;
+  gripper_open_ = box_size_ + 2e-2;
   gripper_closed_ = 0.0;
+  grasp_stanby_height_ = 0.1;
+  place_stanby_height_ = 0.1;
+  ground_length_ = 0.6;
+  ground_width_ = 0.6;
   
   grasp_orientation_.x = 0.923953;
   grasp_orientation_.y = -0.382500;
@@ -77,7 +81,8 @@ cw1::cw1Config()
   cluster_color_thresh_ = 140;
   cluster_dist_thresh_ = 0.04;
   min_cluster_thresh_ = 200;
-  grasp_stanby_height_ = 0.1;
+
+  return;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -87,15 +92,25 @@ cw1::t1_callback(cw1_world_spawner::Task1Service::Request &request,
   cw1_world_spawner::Task1Service::Response &response) 
 {
   /* function which should solve task 1 */
-  geometry_msgs::PoseStamped pick_pose = request.object_loc;
-  geometry_msgs::PointStamped place_point = request.goal_loc;
-
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
   
+  bool sucess = t1_process(request, response);
+  
+  return sucess;
+}
+
+bool
+cw1::t1_process(cw1_world_spawner::Task1Service::Request &request,
+  cw1_world_spawner::Task1Service::Response &response)
+{
+  geometry_msgs::PoseStamped pick_pose = request.object_loc;
+  geometry_msgs::PointStamped place_point = request.goal_loc;
   geometry_msgs::PoseStamped current_pose = arm_group_.getCurrentPose();
   ROS_INFO("Current pose: x=%f, y=%f, z=%f", current_pose.pose.position.x, current_pose.pose.position.y, current_pose.pose.position.z);
   ROS_INFO("Current orientation: x=%f, y=%f, z=%f, w=%f", current_pose.pose.orientation.x, current_pose.pose.orientation.y, current_pose.pose.orientation.z, current_pose.pose.orientation.w);
 
+  clearCollisionObject();
+  addCollitionGround();
   addCollisionBasket(place_point.point);
 
   pickAndPlace(pick_pose, place_point);
@@ -109,6 +124,17 @@ cw1::t1_callback(cw1_world_spawner::Task1Service::Request &request,
 
 bool
 cw1::t2_callback(cw1_world_spawner::Task2Service::Request &request,
+  cw1_world_spawner::Task2Service::Response &response)
+{
+  ROS_INFO("The coursework solving callback for task 1 has been triggered");
+
+  bool success = t2_process(request, response);
+
+  return success;
+}
+
+bool
+cw1::t2_process(cw1_world_spawner::Task2Service::Request &request,
   cw1_world_spawner::Task2Service::Response &response)
 {
   /* function which should solve task 2 */
@@ -184,6 +210,17 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
   cw1_world_spawner::Task3Service::Response &response)
 {
   /* function which should solve task 3 */
+  ROS_INFO("The coursework solving callback for task 3 has been triggered");
+  bool success = t3_process(request, response);
+
+  return success;
+}
+
+bool
+cw1::t3_process(cw1_world_spawner::Task3Service::Request &request,
+  cw1_world_spawner::Task3Service::Response &response)
+{
+  /* function which should solve task 3 */
   bool success = false;
 
   ROS_INFO("The coursework solving callback for task 3 has been triggered");
@@ -207,13 +244,14 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
   // Use regionGrowing to segment the point cloud
   // regionGrowing enables both distance and color based segmentation
   std::vector<PointCPtr> clusters = regionGrowing(cloud_base);
+  // Merge clusters that are close to each other
   clusters = mergeClusters(clusters);
 
   // Log out the number of clusters
   ROS_INFO("Number of clusters: %lu", clusters.size());
 
-  std::map<std::string, geometry_msgs::PointStamped> basket_map;  // 颜色 -> basket 质心
-  std::map<std::string, std::vector<geometry_msgs::PoseStamped>> box_map; // 颜色 -> box pick 位姿
+  std::map<std::string, geometry_msgs::PointStamped> basket_map;
+  std::map<std::string, std::vector<geometry_msgs::PoseStamped>> box_map;
   for (auto cluster : clusters)
   {
     // Compute the centroid of the cluster to pick or place
@@ -263,7 +301,9 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
   ROS_INFO("Number of boxes: %lu", box_map.size());
   ROS_INFO("Number of baskets: %lu", basket_map.size());
 
-  // 5. 对每种颜色，若存在 box 且存在 basket，则对所有 box 执行抓取放置
+  // 4. Add all baskets and boxes to the collision scene
+  clearCollisionObject();
+  addCollitionGround();
   for (auto &entry : basket_map)
   {
     // Add all basket to the collision scene
@@ -271,7 +311,7 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
     addCollisionBasket(basket_loc_point);
   }
 
-
+  // 5. Iterate through all boxes and pick and place them to the corresponding basket
   for (auto &entry : box_map)
   {
     std::string color = entry.first;
@@ -280,12 +320,11 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
       ROS_WARN("No basket found for color %s; skipping boxes of that color.", color.c_str());
       continue;
     }
-    // 对 basket，若有多个 box要放入，考虑堆叠：每放一个 box，放置高度增加 box_size_
     geometry_msgs::PointStamped basket_loc = basket_map[color];
-    int count = 0;
+    // Record the num of boxes placed in the basket, since the height will increase
+    int count = 0; 
     for (const auto &pick_pose : box_poses)
     {
-      // 构造放置点，初始位置为 basket 质心，加上一个基本的 offset（hand_offset_）和堆叠高度 count * box_size_
       geometry_msgs::PointStamped place_point;
       place_point.header.frame_id = base_frame_;
       place_point.point.x = basket_loc.point.x;
@@ -295,7 +334,6 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
               color.c_str(),
               pick_pose.pose.position.x, pick_pose.pose.position.y, pick_pose.pose.position.z,
               place_point.point.x, place_point.point.y, place_point.point.z);
-      // 调用 pickAndPlace 进行抓取和放置，抓取时保持当前机械臂位姿
       pickAndPlace(pick_pose, place_point);
       ++count;
     }
@@ -304,6 +342,7 @@ cw1::t3_callback(cw1_world_spawner::Task3Service::Request &request,
   return true;
 }
 
+///////////////////////////////////////////////////////////////////////////////
 bool
 cw1::moveArm(geometry_msgs::PoseStamped target_pose)
 {
@@ -361,7 +400,7 @@ cw1::moveGripper(float width, float wait_time)
   
       if (result == moveit::core::MoveItErrorCode::SUCCESS) {
         ROS_INFO("Gripper move executed successfully, waiting for completion...");
-        hand_group_.getMoveGroupClient().waitForResult(ros::Duration(wait_time)); // 等待最多 5 秒
+        hand_group_.getMoveGroupClient().waitForResult(ros::Duration(wait_time));
         ROS_INFO("Gripper move completed.");
       }
       else {
@@ -377,6 +416,9 @@ cw1::moveGripper(float width, float wait_time)
   return success;
 }
 
+
+/* Note: Pick point uses center of the box, Place points uses top of the basket */
+/* This should be consistent between t1 and t3 */
 void
 cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStamped place_point)
 {
@@ -386,8 +428,10 @@ cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStam
 
   // always consider the griper length
   pick_pose.pose.position.z += hand_offset_;
-
   place_point.point.z += hand_offset_;
+  place_point.point.z += basket_size_;
+
+  // Build the place point pose
   place_point_pose.pose.position = place_point.point;
   place_point_pose.pose.orientation = grasp_orientation_;
   place_point_pose.header.frame_id = base_frame_;
@@ -399,7 +443,7 @@ cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStam
 
   moveGripper(gripper_open_);
 
-  pick_pose.pose.position.z -= hand_offset_;
+  pick_pose.pose.position.z -= grasp_stanby_height_;
   moveArm(pick_pose);
 
   // move the gripper to the closed width
@@ -408,18 +452,20 @@ cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStam
   // Wait 0.5s for the gripper to close
   ros::Duration(0.5).sleep();
 
-  pick_pose.pose.position.z += grasp_stanby_height_;
+  // Pick up
+  pick_pose.pose.position.z += grasp_stanby_height_ + 0.1;
   moveArm(pick_pose);
 
   ROS_INFO("Object picked up");
 
   // move to top of place point
-  // 0.1m higher for safety
-  place_point_pose.pose.position.z += grasp_stanby_height_ + 0.1;
+  // higher for safety
+  place_point_pose.pose.position.z += place_stanby_height_;
+
   // move the arm to the place point
   moveArm(place_point_pose);
 
-  place_point_pose.pose.position.z -= grasp_stanby_height_;
+  place_point_pose.pose.position.z -= place_stanby_height_;
   // move the arm to the place point
   moveArm(place_point_pose);
 
@@ -431,13 +477,40 @@ cw1::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStam
   return;
 }
 
+void
+cw1::addCollitionGround()
+{
+  moveit_msgs::CollisionObject ground;
+
+  float thickness = 9e-3;
+  float length = ground_length_;
+  float width = ground_width_;
+  float height = 0.0;
+
+  ground.id = "ground";
+  ground.header.frame_id = base_frame_;
+
+  ground.primitives.resize(1);
+  ground.primitives[0].type = ground.primitives[0].BOX;
+  ground.primitives[0].dimensions.resize(3);
+  ground.primitives[0].dimensions[0] = length;
+  ground.primitives[0].dimensions[1] = width;
+  ground.primitives[0].dimensions[2] = thickness;
+
+  ground.operation = ground.ADD;
+
+  collision_object_vector_.push_back(ground);
+
+  planning_scene_interface_.applyCollisionObjects(collision_object_vector_);
+
+  return;
+}
+
 void 
 cw1::addCollisionBasket(geometry_msgs::Point centre)
 {
   // create a collision object message, and a vector of these messages
   moveit_msgs::CollisionObject basket_bottom;
-
-  std::vector<moveit_msgs::CollisionObject> object_vector;
 
   ROS_INFO("Adding collision basket at x=%f, y=%f, z=%f", centre.x, centre.y, centre.z);
 
@@ -468,7 +541,7 @@ cw1::addCollisionBasket(geometry_msgs::Point centre)
   basket_bottom.operation = basket_bottom.ADD;
 
   // add the collision object to the vector, then apply to planning scene
-  object_vector.push_back(basket_bottom);
+  collision_object_vector_.push_back(basket_bottom);
 
   std::vector<geometry_msgs::Pose> wall_poses;
   geometry_msgs::Pose pose;
@@ -514,16 +587,22 @@ cw1::addCollisionBasket(geometry_msgs::Point centre)
       wall.primitive_poses.push_back(wall_poses[i]);
       wall.operation = wall.ADD;
 
-      object_vector.push_back(wall);
+      collision_object_vector_.push_back(wall);
   }
 
-  planning_scene_interface_.applyCollisionObjects(object_vector);
+  planning_scene_interface_.applyCollisionObjects(collision_object_vector_);
 
   return;
 }
 
+void
+cw1::clearCollisionObject()
+{
+  collision_object_vector_.clear();
+  planning_scene_interface_.clear();
+  return;
+}
 
-//////// For task2 //////
 void
 cw1::cameraImgCallback(const sensor_msgs::ImageConstPtr& msg)
 {
@@ -593,16 +672,18 @@ cw1::regionGrowing(PointCPtr cloud)
 {
   PointCPtr filtered_cloud = filterCloudWithColor(cloud);
 
+  // Note: VX Abondoned since it makes the distance thresh hard to tune
   // Apply vx to the cloud
   // pcl::VoxelGrid<PointT> vx;
   // vx.setInputCloud(filtered_cloud);
   // vx.setLeafSize(0.015f, 0.015f, 0.015f);
   // vx.filter(*filtered_cloud);
 
+  // Apply region growing to the cloud, to segment the point cloud
   std::vector<PointCPtr> clusters;
   std::vector<PointCPtr> merged_clusters;
   pcl::RegionGrowingRGB<PointT> reg;
-  reg.setInputCloud(filtered_cloud); // cloud is a pointcloud pointer
+  reg.setInputCloud(filtered_cloud); 
   reg.setDistanceThreshold(cluster_dist_thresh_);
   reg.setPointColorThreshold(cluster_color_thresh_);
   reg.setRegionColorThreshold(cluster_color_thresh_ + 0.1);
@@ -613,9 +694,11 @@ cw1::regionGrowing(PointCPtr cloud)
 
   for (std::vector<pcl::PointIndices>::const_iterator it = clusters_indices.begin (); it != clusters_indices.end (); ++it)
   {
-    pcl::PointCloud<PointT>::Ptr cloud_cluster (new PointC);
+    PointCPtr cloud_cluster (new PointC);
     for (std::vector<int>::const_iterator pit = it->indices.begin (); pit != it->indices.end (); ++pit)
-      cloud_cluster->points.push_back (filtered_cloud->points[*pit]); //*
+    {
+      cloud_cluster->points.push_back (filtered_cloud->points[*pit]); 
+    }
     cloud_cluster->width = cloud_cluster->points.size ();
     cloud_cluster->height = 1;
     cloud_cluster->is_dense = true;
@@ -626,6 +709,8 @@ cw1::regionGrowing(PointCPtr cloud)
   return clusters;
 }
 
+
+/* Get the location of a base_frame point in the image coordinate */
 std::pair<int, int>
 cw1::getLocOfCameraImage(geometry_msgs::PointStamped basket_loc)
 {
@@ -671,54 +756,48 @@ cw1::colorMapping(float r, float g, float b)
   return "none";
 }
 
+
+/* Remove all items that is not in red/purple/blue */
 PointCPtr
 cw1::filterCloudWithColor(PointCPtr cloud)
 {
   PointCPtr filtered_cloud(new PointC);
 
-  // 遍历点云，对每个点进行颜色过滤
   for (const auto& pt : cloud->points)
   {
-      // 归一化颜色值
       float r = static_cast<float>(pt.r) / 255.0f;
       float g = static_cast<float>(pt.g) / 255.0f;
       float b = static_cast<float>(pt.b) / 255.0f;
 
-      // 判断是否在 purple 的范围内
       bool isPurple = (r > 0.7f && r < 0.9f) &&
                       (g > 0.0f && g < 0.2f) &&
                       (b > 0.7f && b < 0.9f);
 
-      // 判断是否在 red 的范围内
       bool isRed    = (r > 0.7f && r < 0.9f) &&
                       (g > 0.0f && g < 0.2f) &&
                       (b > 0.0f && b < 0.2f);
 
-      // 判断是否在 blue 的范围内
       bool isBlue   = (r > 0.0f && r < 0.2f) &&
                       (g > 0.0f && g < 0.2f) &&
                       (b > 0.7f && b < 0.9f);
 
-      // 如果点属于三种颜色中的任一种，则保留
       if (isPurple || isRed || isBlue)
       {
           filtered_cloud->points.push_back(pt);
       }
   }
 
-  // 更新点云的尺寸信息（若为非组织点云则 height 设置为 1）
   filtered_cloud->width = filtered_cloud->points.size();
   filtered_cloud->height = 1;
 
   return filtered_cloud;
 }
 
+/* Transform PCloud from camera frame to base frame */
 PointCPtr
 cw1::transformCloudToBaseFrame(PointCPtr cloud_in)
 {
-  // Create a new point cloud
   PointCPtr cloud_out(new PointC);
-  // Transform the cloud
   pcl_ros::transformPointCloud(base_frame_, *cloud_, *cloud_out, tf_buffer_);
 
   return cloud_out;
@@ -727,20 +806,16 @@ cw1::transformCloudToBaseFrame(PointCPtr cloud_in)
 std::vector<PointCPtr> 
 cw1::mergeClusters(const std::vector<PointCPtr>& clusters)
 {
-  // mergedClusters 最终保存所有合并后的聚类
   std::vector<PointCPtr> mergedClusters;
-  // 用来记录颜色映射（比如 "red", "blue", "purple"）对应 mergedClusters 中的索引
   std::map<std::string, size_t> colorMap;
 
-  // 遍历每个聚类
   for (size_t i = 0; i < clusters.size(); ++i)
   {
     PointCPtr cluster = clusters[i];
 
-    // 如果聚类点数大于 merge_size_thresh，则考虑合并同色的聚类
+    // Only merge basket, since there will not be multiple basket in the same color
     if (cluster->size() > box_basket_size_thresh_)
     {
-      // 选取一个代表点（这里随机选取一个点）
       int random_index = rand() % cluster->size();
       PointT point = cluster->points[random_index];
       float r = static_cast<float>(point.r) / 255.0f;
@@ -748,10 +823,9 @@ cw1::mergeClusters(const std::vector<PointCPtr>& clusters)
       float b = static_cast<float>(point.b) / 255.0f;
       std::string colStr = colorMapping(r, g, b);
 
-      // 如果这个颜色还没有在 map 中，新建一个合并聚类
+      // Add the color to the map
       if (colorMap.find(colStr) == colorMap.end())
       {
-        // 新建一个聚类，拷贝当前聚类
         PointCPtr mergedCluster(new PointC);
         *mergedCluster += *cluster;
         mergedClusters.push_back(mergedCluster);
@@ -759,14 +833,14 @@ cw1::mergeClusters(const std::vector<PointCPtr>& clusters)
       }
       else
       {
-        // 找到已有的聚类，将当前聚类的点合并进去
+        // Merge the cluster
         size_t idx = colorMap[colStr];
         *mergedClusters[idx] += *cluster;
       }
     }
     else
     {
-      // 对于小聚类，可以不合并，直接加入最终结果
+      // Do not merge boxes
       mergedClusters.push_back(cluster);
     }
   }
