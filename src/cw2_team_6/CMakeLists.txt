@@ -17,6 +17,9 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_ros
   pcl_ros
   cw2_world_spawner
+  sensor_msgs
+  cv_bridge
+  image_transport
 )
 
 ## System dependencies are found with CMake's conventions
@@ -111,7 +114,7 @@ generate_messages(
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES move_panda
- CATKIN_DEPENDS message_runtime cw2_world_spawner
+  CATKIN_DEPENDS message_runtime cw2_world_spawner
 #  DEPENDS system_lib
 )
 
@@ -162,7 +165,12 @@ add_dependencies(cw2_solution_node
 target_link_libraries(cw2_solution_node
   ${catkin_LIBRARIES}
   ${PROJECT_NAME}_cw2_class_lib
-  ${PCL_INCLUDE_DIRS}
+  ${PCL_LIBRARIES}
+)
+
+target_link_libraries(${PROJECT_NAME}_cw2_class_lib
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
 )
 
 #############

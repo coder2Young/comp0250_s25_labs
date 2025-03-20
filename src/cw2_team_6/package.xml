@@ -59,6 +59,7 @@
   <exec_depend>roscpp</exec_depend>
   <exec_depend>std_msgs</exec_depend>
 
+  <depend>cw2_world_spawner</depend>
   <depend>moveit_core</depend>
   <depend>moveit_ros_planning_interface</depend>
   <depend>tf2</depend>
@@ -68,7 +69,7 @@
   <depend>message_runtime</depend>
   <depend>pcl_ros</depend>
   <depend>pcl_conversions</depend>
-  <depend>cw2_world_spawner</depend>
+ 
 
 
   <!-- The export tag contains other, unspecified, tags -->
