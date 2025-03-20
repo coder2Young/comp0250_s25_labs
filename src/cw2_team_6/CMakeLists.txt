@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0.2)
-project(cw2_team_x) # change your team name here!
+project(cw2_team_6) # change your team name here!
 
 ## Compile as C++11, supported in ROS Kinetic and newer
 # add_compile_options(-std=c++11)
