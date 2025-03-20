@@ -30,6 +30,9 @@ cw2::cw2(ros::NodeHandle nh):
   cloud_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_filtered", 1, true);
   cloud_object_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_object", 1, true);
   
+  // 初始化PCA轴可视化发布器
+  pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/pca_axes", 1, true);
+  
   ROS_INFO("cw2 class initialised");
 }
 
@@ -44,10 +47,14 @@ cw2::cw2_config()
 
   ROS_INFO("Configuring the robot for the coursework");
 
+  // Enable debug mode
+  debug_ = true;
+  ROS_INFO("Debug mode is enabled");
+
   box_size_ = 0.04;
   basket_size_ = 0.1;
-  hand_offset_ = 0.11;
-  gripper_open_ = box_size_ + 2e-2;
+  hand_offset_ = 0.15;
+  gripper_open_ = 0.08;
   gripper_closed_ = 0.0;
   grasp_stanby_height_ = 0.1;
   place_stanby_height_ = 0.1;
@@ -71,7 +78,7 @@ cw2::cw2_config()
   cluster_dist_thresh_ = 0.04;
   min_cluster_thresh_ = 200;
 
-  scan_height_ = 0.6;
+  scan_height_ = 0.7;
   
   // Euclidean clustering parameters
   cluster_tolerance_ = 0.02;    // 2cm tolerance between points in cluster
@@ -91,6 +98,10 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
 
   ROS_INFO("\n\n====== TASK 1 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
+  
+  if (debug_) {
+    ROS_INFO("Debug mode is enabled - will provide extended logging and return to home after completion");
+  }
 
   // Make sure the robot is configured
   cw2_config();
@@ -112,15 +123,19 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   // 2. Get filtered point cloud
   PointCPtr filtered_cloud = getFilteredPointCloud();
   
-  // Publish filtered cloud for debugging
-  publishPointCloud(filtered_cloud, cloud_filtered_pub_);
+  // Publish filtered cloud only in debug mode
+  if (debug_) {
+    publishPointCloud(filtered_cloud, cloud_filtered_pub_);
+  }
   
   // 3. Extract object from point cloud
   PointCPtr object_cloud = 
       extractObjectPointCloud(filtered_cloud, object_point.point);
   
-  // Publish object cloud for debugging
-  publishPointCloud(object_cloud, cloud_object_pub_);
+  // Publish object cloud only in debug mode
+  if (debug_) {
+    publishPointCloud(object_cloud, cloud_object_pub_);
+  }
   
   // 4. Determine object orientation
   ObjectOrientationData orientation_data = 
@@ -167,22 +182,83 @@ PointCPtr cw2::getFilteredPointCloud() {
     return PointCPtr(new PointC);
   }
   
-  // Convert ROS message to PCL point cloud
-  PointCPtr cloud(new PointC);
-  pcl::fromROSMsg(*cloud_msg, *cloud);
+  // Save the original frame ID for transformation
+  std::string camera_frame_id = cloud_msg->header.frame_id;
+  ROS_INFO("Received point cloud in frame: %s", camera_frame_id.c_str());
   
+  // Convert ROS message to PCL point cloud (still in camera frame)
+  PointCPtr cloud_camera(new PointC);
+  pcl::fromROSMsg(*cloud_msg, *cloud_camera);
+  
+  // Transform the point cloud from camera frame to base frame
+  PointCPtr cloud_base(new PointC);
+  try {
+    // Look up transform from camera to base frame
+    geometry_msgs::TransformStamped transform_stamped;
+    transform_stamped = tf_buffer_.lookupTransform(
+      base_frame_, camera_frame_id, ros::Time(0), ros::Duration(1.0));
+    
+    // Apply transform to the point cloud
+    pcl_ros::transformPointCloud(*cloud_camera, *cloud_base, transform_stamped.transform);
+    ROS_INFO("Successfully transformed point cloud to %s frame", base_frame_.c_str());
+  } catch (tf2::TransformException &ex) {
+    ROS_ERROR("Transform lookup failed: %s", ex.what());
+    ROS_WARN("Continuing with untransformed cloud - results may be incorrect!");
+    cloud_base = cloud_camera; // Fallback to untransformed cloud
+  }
+  
+  // Filter by color - only keep red/blue/purple/black objects
+  PointCPtr color_filtered_cloud(new PointC);
+  color_filtered_cloud->header = cloud_base->header;
+  
+  for (const auto& pt : cloud_base->points) {
+    float r = static_cast<float>(pt.r) / 255.0f;
+    float g = static_cast<float>(pt.g) / 255.0f;
+    float b = static_cast<float>(pt.b) / 255.0f;
+
+    bool isPurple = (r > 0.7f && r < 0.9f) &&
+                   (g > 0.0f && g < 0.2f) &&
+                   (b > 0.7f && b < 0.9f);
+
+    bool isRed = (r > 0.7f && r < 0.9f) &&
+                (g > 0.0f && g < 0.2f) &&
+                (b > 0.0f && b < 0.2f);
+
+    bool isBlue = (r > 0.0f && r < 0.2f) &&
+                 (g > 0.0f && g < 0.2f) &&
+                 (b > 0.7f && b < 0.9f);
+                 
+    bool isBlack = (r < 0.2f) && (g < 0.2f) && (b < 0.2f);
+
+    if (isPurple || isRed || isBlue || isBlack) {
+      color_filtered_cloud->points.push_back(pt);
+    }
+  }
+  
+  color_filtered_cloud->width = color_filtered_cloud->points.size();
+  color_filtered_cloud->height = 1;
+  
+  ROS_INFO("Color filtering: kept %lu of %lu points", 
+           color_filtered_cloud->points.size(), cloud_base->points.size());
+
+  // Comment out voxel grid downsampling to use original point density
+  /*
   // Apply voxel grid filter to downsample
   pcl::VoxelGrid<PointT> voxel_filter;
   PointCPtr cloud_filtered(new PointC);
-  voxel_filter.setInputCloud(cloud);
+  voxel_filter.setInputCloud(color_filtered_cloud);
   voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 5mm voxel size
   voxel_filter.filter(*cloud_filtered);
+  */
+  
+  // Use color filtered cloud directly without downsampling
+  PointCPtr cloud_filtered = color_filtered_cloud;
   
   // Remove NaN points
   std::vector<int> indices;
   pcl::removeNaNFromPointCloud(*cloud_filtered, *cloud_filtered, indices);
   
-  ROS_INFO("Point cloud filtered: %lu points", cloud_filtered->points.size());
+  ROS_INFO("Final filtered point cloud: %lu points", cloud_filtered->points.size());
   
   return cloud_filtered;
 }
@@ -343,6 +419,17 @@ ObjectOrientationData cw2::determineObjectOrientation(
   
   result.is_valid = true;
   ROS_INFO("====== ORIENTATION DETERMINATION COMPLETED ======\n");
+  
+  // PCA分析后调用可视化
+  geometry_msgs::Point object_center;
+  Eigen::Vector4f centroid;
+  pcl::compute3DCentroid(*object_cloud, centroid);
+  object_center.x = centroid[0];
+  object_center.y = centroid[1];
+  object_center.z = centroid[2];
+  
+  visualizePCAAxes(eigenvectors, object_center, shape_type);
+  
   return result;
 }
 
@@ -364,55 +451,100 @@ bool cw2::planAndExecuteGrasp(
   geometry_msgs::PoseStamped grasp_pose;
   grasp_pose.header.frame_id = base_frame_;
   
-  // Keep gripper vertical, rotate only around Z axis
-  tf2::Quaternion q_rot;
-  q_rot.setRPY(0, 0, orientation_data.grasp_angle); // Use pre-computed angle
+  // Use the predefined downward-facing orientation as base
+  tf2::Quaternion q_base;
+  tf2::convert(grasp_orientation_, q_base);
+  
+  // Create quaternion for Z-axis rotation based on object orientation
+  tf2::Quaternion q_z;
   
   if (shape_type == "cross") {
-    // For cross objects, grasp at the center
+    // For cross objects, grasp along one arm, near the outer edge
+    float arm_length = 0.08; // 80mm - move 2 cubes out from center
+    
+    // Set grasp angle perpendicular to the arm with extra 90-degree rotation for proper gripper alignment
+    float grasp_angle = atan2(orientation_data.primary_axis[1], orientation_data.primary_axis[0]) + M_PI; // Full 180-degree rotation
+    q_z.setRPY(0, 0, grasp_angle);
+    
+    // Move from center along arm direction
     grasp_pose.pose.position = object_point;
-    // Account for gripper length
+    grasp_pose.pose.position.x += arm_length * orientation_data.primary_axis[0];
+    grasp_pose.pose.position.y += arm_length * orientation_data.primary_axis[1];
     grasp_pose.pose.position.z += hand_offset_;
     
     ROS_INFO("Cross grasp strategy:");
-    ROS_INFO("- Gripper aligned with arm direction at angle %.1f degrees", 
-             orientation_data.grasp_angle * 180.0/M_PI);
-    ROS_INFO("- Grasping at center point [%f, %f, %f]", 
+    ROS_INFO("- Grasping along arm at distance %.1f mm from center", arm_length * 1000);
+    ROS_INFO("- Gripper perpendicular to arm at angle %.1f degrees", grasp_angle * 180.0/M_PI);
+    ROS_INFO("- Grasp point: [%f, %f, %f]", 
              grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
   } 
   else { // "nought"
-    // For ring-shaped objects, grasp at a corner
-    float corner_offset = 0.1; // 100mm, half the square edge length
-    // Move to the corner position using the pre-computed secondary axis
+    // For ring-shaped objects, grasp the middle of an edge
+    // Use 45-degree angle between primary and secondary axes (diagonal directions)
+    
+    // Calculate the 45-degree direction between primary and secondary axes
+    Eigen::Vector3f edge_direction;
+    edge_direction[0] = orientation_data.primary_axis[0] + orientation_data.secondary_axis[0];
+    edge_direction[1] = orientation_data.primary_axis[1] + orientation_data.secondary_axis[1];
+    edge_direction[2] = 0.0f; // Keep it in the horizontal plane
+    edge_direction.normalize();
+    
+    // Use 100mm distance to reach the edge from center
+    float edge_distance = 0.1; // 100mm
+    
+    // Set grasp angle perpendicular to the edge for better grip (add 90 degrees)
+    float grasp_angle = atan2(edge_direction[1], edge_direction[0]) + M_PI/2;
+    q_z.setRPY(0, 0, grasp_angle);
+    
+    // Move from center along the 45-degree direction
     grasp_pose.pose.position = object_point;
-    grasp_pose.pose.position.x += corner_offset * orientation_data.secondary_axis[0];
-    grasp_pose.pose.position.y += corner_offset * orientation_data.secondary_axis[1];
-    grasp_pose.pose.position.z += hand_offset_; // Account for gripper length
+    grasp_pose.pose.position.x += edge_distance * edge_direction[0];
+    grasp_pose.pose.position.y += edge_distance * edge_direction[1];
+    grasp_pose.pose.position.z += hand_offset_;
     
     ROS_INFO("Square ring grasp strategy:");
-    ROS_INFO("- Gripper aligned with diagonal at angle %.1f degrees", 
-             orientation_data.grasp_angle * 180.0/M_PI);
-    ROS_INFO("- Grasping at corner point [%f, %f, %f] (offset by %.2f m from center)", 
-             grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z,
-             corner_offset);
+    ROS_INFO("- Using 45-degree direction between principal axes");
+    ROS_INFO("- Direction vector: [%.2f, %.2f]", edge_direction[0], edge_direction[1]);
+    ROS_INFO("- Grasping at distance %.1f mm from center", edge_distance * 1000);
+    ROS_INFO("- Gripper perpendicular to edge at angle %.1f degrees", grasp_angle * 180.0/M_PI);
+    ROS_INFO("- Grasp point: [%f, %f, %f]", 
+             grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
   }
+  
+  // Combine rotations (first apply base orientation, then Z rotation)
+  tf2::Quaternion q_rot = q_z * q_base;
+  q_rot.normalize();
   
   // Convert to geometry_msgs quaternion
   geometry_msgs::Quaternion q_msg;
   tf2::convert(q_rot, q_msg);
   grasp_pose.pose.orientation = q_msg;
   
+  // Output final orientation for debugging
+  tf2::Matrix3x3 m(q_rot);
+  double roll, pitch, yaw;
+  m.getRPY(roll, pitch, yaw);
+  ROS_INFO("Final gripper orientation - Roll: %.2f, Pitch: %.2f, Yaw: %.2f (degrees)",
+           roll * 180.0/M_PI, pitch * 180.0/M_PI, yaw * 180.0/M_PI);
+  
   ROS_INFO("Executing grasp sequence...");
   
-  // Execute grasp action
-  // First open the gripper
-  ROS_INFO("Opening gripper...");
+  // Make sure we open gripper to the specified width
+  ROS_INFO("Opening gripper to maximum width...");
   moveGripper(gripper_open_);
+  
+  // Log the actual gripper opening for debugging
+  ROS_INFO("Gripper opened to %.3f meters", gripper_open_);
   
   // Move to position above object
   ROS_INFO("Moving to pre-grasp position...");
   geometry_msgs::PoseStamped pregrasp_pose = grasp_pose;
   pregrasp_pose.pose.position.z += grasp_stanby_height_;
+  
+  // Log the pre-grasp position for debugging
+  ROS_INFO("Pre-grasp position: [%f, %f, %f]", 
+           pregrasp_pose.pose.position.x, pregrasp_pose.pose.position.y, pregrasp_pose.pose.position.z);
+  
   bool success = moveArm(pregrasp_pose);
   if (!success) {
     ROS_ERROR("Failed to move to pre-grasp position");
@@ -421,11 +553,9 @@ bool cw2::planAndExecuteGrasp(
   
   // Move to grasp position
   ROS_INFO("Moving to grasp position...");
+  ROS_INFO("Grasp position: [%f, %f, %f]", 
+           grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
   success = moveArm(grasp_pose);
-  if (!success) {
-    ROS_ERROR("Failed to move to grasp position");
-    return false;
-  }
   
   // Close gripper
   ROS_INFO("Closing gripper to grasp object...");
@@ -464,23 +594,13 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &goal_point) {
   geometry_msgs::PoseStamped place_pose;
   place_pose.header.frame_id = base_frame_;
   
-  // Move above basket
+  // Simplified approach: Move to 0.2m above goal point
   place_pose.pose.position = goal_point;
-  place_pose.pose.position.z += place_stanby_height_ + basket_size_;
+  place_pose.pose.position.z += 0.3;  // 20cm above goal point
   place_pose.pose.orientation = grasp_orientation_;
   
-  // Move to pre-place position
-  ROS_INFO("Moving to pre-place position...");
+  ROS_INFO("Moving to place position (20cm above goal)...");
   bool success = moveArm(place_pose);
-  if (!success) {
-    ROS_ERROR("Failed to move to pre-place position");
-    return false;
-  }
-  
-  // Move down to place position
-  ROS_INFO("Moving down to place position...");
-  place_pose.pose.position.z = goal_point.z + 0.05;  // Just above basket bottom
-  success = moveArm(place_pose);
   if (!success) {
     ROS_ERROR("Failed to move to place position");
     return false;
@@ -493,32 +613,53 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &goal_point) {
   // Wait for release
   ros::Duration(0.5).sleep();
   
-  // Move up from basket
-  ROS_INFO("Moving up from basket...");
-  place_pose.pose.position.z += place_stanby_height_ + basket_size_;
-  success = moveArm(place_pose);
-  
-  if (success) {
-    ROS_INFO("Place operation successful");
-  } else {
-    ROS_ERROR("Failed to move up after placing");
+  // If debug mode is enabled, return to home position
+  if (debug_) {
+    ROS_INFO("Debug mode: Returning to home position...");
+    
+    // Create home pose
+    geometry_msgs::PoseStamped home_pose;
+    home_pose.header.frame_id = base_frame_;
+    
+    // Use a safe position as home
+    home_pose.pose.position.x = 0.4;  // Forward
+    home_pose.pose.position.y = 0.0;  // Center
+    home_pose.pose.position.z = 0.6;  // Up
+    home_pose.pose.orientation = grasp_orientation_;
+    
+    success = moveArm(home_pose);
+    if (!success) {
+      ROS_WARN("Failed to return to home position");
+      // Continue anyway, not critical
+    } else {
+      ROS_INFO("Successfully returned to home position");
+    }
   }
   
   ROS_INFO("====== PLACE EXECUTION COMPLETED ======\n");
-  return success;
+  return true;  // Return true even if home position fails, as the main task succeeded
 }
 
 void cw2::publishPointCloud(
     const PointCPtr &cloud,
     const ros::Publisher &publisher) {
   
+  // Only proceed if in debug mode
+  if (!debug_) {
+    return;
+  }
+  
   sensor_msgs::PointCloud2 cloud_msg;
   pcl::toROSMsg(*cloud, cloud_msg);
+  
+  // All point clouds are now in base_frame
   cloud_msg.header.frame_id = base_frame_;
   cloud_msg.header.stamp = ros::Time::now();
+  
   publisher.publish(cloud_msg);
   
-  ROS_INFO("Published point cloud with %lu points", cloud->points.size());
+  ROS_INFO("Published point cloud with %lu points in frame %s", 
+           cloud->points.size(), cloud_msg.header.frame_id.c_str());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -681,4 +822,124 @@ cw2::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStam
   ROS_INFO("Object placed");
 
   return;
+}
+
+// 实现可视化函数
+void cw2::visualizePCAAxes(
+    const Eigen::Matrix3f &eigenvectors,
+    const geometry_msgs::Point &center_point,
+    const std::string &shape_type) {
+  
+  // Skip visualization if not in debug mode
+  if (!debug_) {
+    return;
+  }
+  
+  ROS_INFO("Visualizing PCA axes in RViz");
+  
+  visualization_msgs::MarkerArray marker_array;
+  
+  // 为三个主轴创建箭头标记
+  for (int i = 0; i < 3; i++) {
+    visualization_msgs::Marker marker;
+    marker.header.frame_id = base_frame_;
+    marker.header.stamp = ros::Time::now();
+    marker.ns = "pca_axes";
+    marker.id = i;
+    marker.type = visualization_msgs::Marker::ARROW;
+    marker.action = visualization_msgs::Marker::ADD;
+    
+    // 设置箭头起点为物体中心
+    marker.pose.position = center_point;
+    
+    // 计算箭头方向四元数
+    Eigen::Vector3f axis = eigenvectors.col(i);
+    Eigen::Vector3f z_axis(0, 0, 1);
+    Eigen::Vector3f rotation_axis = z_axis.cross(axis);
+    
+    if (rotation_axis.norm() > 1e-6) {
+      float angle = acos(z_axis.dot(axis) / axis.norm());
+      rotation_axis.normalize();
+      
+      tf2::Quaternion q;
+      q.setRotation(tf2::Vector3(rotation_axis[0], rotation_axis[1], rotation_axis[2]), angle);
+      marker.pose.orientation.x = q.x();
+      marker.pose.orientation.y = q.y();
+      marker.pose.orientation.z = q.z();
+      marker.pose.orientation.w = q.w();
+    }
+    
+    // 设置箭头尺寸
+    float scale_factor = 0.15;  // 主轴长度，可根据需要调整
+    marker.scale.x = scale_factor; // 箭头长度
+    marker.scale.y = 0.01;        // 箭头宽度
+    marker.scale.z = 0.01;        // 箭头高度
+    
+    // 设置颜色 - 红色=第一主轴，绿色=第二主轴，蓝色=第三主轴
+    marker.color.a = 1.0;  // 不透明度
+    if (i == 0) {
+      marker.color.r = 1.0; marker.color.g = 0.0; marker.color.b = 0.0;
+    } else if (i == 1) {
+      marker.color.r = 0.0; marker.color.g = 1.0; marker.color.b = 0.0;
+    } else {
+      marker.color.r = 0.0; marker.color.g = 0.0; marker.color.b = 1.0;
+    }
+    
+    // 设置持续时间 (0表示永久)
+    marker.lifetime = ros::Duration(0);
+    
+    // 添加到标记数组
+    marker_array.markers.push_back(marker);
+  }
+  
+  // 添加指示夹取位置和方向的标记
+  visualization_msgs::Marker grasp_marker;
+  grasp_marker.header.frame_id = base_frame_;
+  grasp_marker.header.stamp = ros::Time::now();
+  grasp_marker.ns = "grasp_direction";
+  grasp_marker.id = 3;
+  grasp_marker.type = visualization_msgs::Marker::ARROW;
+  grasp_marker.action = visualization_msgs::Marker::ADD;
+  
+  // 在determineObjectOrientation函数中调用
+  float distance = 0.08;
+  Eigen::Vector3f direction;
+  
+  if (shape_type == "cross") {
+    direction = eigenvectors.col(0); // 第一主轴
+    grasp_marker.scale.x = 0.12;     // 箭头长度
+  } else { // "nought"
+    direction = eigenvectors.col(0); // 抓取边缘方向
+    grasp_marker.scale.x = 0.12;     // 箭头长度
+  }
+  
+  grasp_marker.pose.position = center_point;
+  grasp_marker.pose.position.x += distance * direction[0];
+  grasp_marker.pose.position.y += distance * direction[1];
+  
+  // 设置抓取方向
+  float grasp_angle = atan2(direction[1], direction[0]) + M_PI/2;
+  tf2::Quaternion q;
+  q.setRPY(0, 0, grasp_angle);
+  grasp_marker.pose.orientation.x = q.x();
+  grasp_marker.pose.orientation.y = q.y();
+  grasp_marker.pose.orientation.z = q.z();
+  grasp_marker.pose.orientation.w = q.w();
+  
+  grasp_marker.scale.y = 0.02;    // 箭头宽度
+  grasp_marker.scale.z = 0.02;    // 箭头高度
+  
+  // 设置颜色 - 黄色表示抓取方向
+  grasp_marker.color.r = 1.0;
+  grasp_marker.color.g = 1.0;
+  grasp_marker.color.b = 0.0;
+  grasp_marker.color.a = 1.0;
+  
+  grasp_marker.lifetime = ros::Duration(0);
+  
+  marker_array.markers.push_back(grasp_marker);
+  
+  // 发布标记数组
+  pca_axes_pub_.publish(marker_array);
+  ROS_INFO("PCA axes visualization published");
 }

@@ -52,6 +52,8 @@ solution is contained within the cw2_team_<your_team_number> package */
 // standard c++ library includes (std::string, std::vector)
 #include <string>
 #include <vector>
+// Add marker array for PCA visualization
+#include <visualization_msgs/MarkerArray.h>
 
 // include services from the spawner package - we will be responding to these
 #include "cw2_world_spawner/Task1Service.h"
@@ -86,7 +88,7 @@ typedef enum {
   none
 } Color;
 
-// Add this struct to organize orientation data
+// Structure for organizing orientation data from PCA analysis
 struct ObjectOrientationData {
   Eigen::Vector3f primary_axis;    // Main orientation vector (largest variance for cross, normal for nought)
   Eigen::Vector3f secondary_axis;  // Secondary axis for nought shape (used for corner grasping)
@@ -182,6 +184,7 @@ public:
   // Point cloud publishers for visualization
   ros::Publisher cloud_filtered_pub_;
   ros::Publisher cloud_object_pub_;
+  ros::Publisher pca_axes_pub_;  // For visualizing PCA axes
 
   // Task 1 methods
   bool executeTask1(const cw2_world_spawner::Task1Service::Request &req, 
@@ -208,6 +211,11 @@ public:
   void publishPointCloud(
       const PointCPtr &cloud,
       const ros::Publisher &publisher);
+      
+  void visualizePCAAxes(
+      const Eigen::Matrix3f &eigenvectors,
+      const geometry_msgs::Point &center_point,
+      const std::string &shape_type);
 
   // Constructor and destructor
   ~cw2();
