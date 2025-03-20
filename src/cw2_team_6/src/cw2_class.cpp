@@ -29,8 +29,6 @@ cw2::cw2(ros::NodeHandle nh):
   // The last "true" parameter enables latched mode - messages will persist for new subscribers
   cloud_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_filtered", 1, true);
   cloud_object_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_object", 1, true);
-  
-  // 初始化PCA轴可视化发布器
   pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/pca_axes", 1, true);
   
   ROS_INFO("cw2 class initialised");
@@ -53,7 +51,7 @@ cw2::cw2_config()
 
   box_size_ = 0.04;
   basket_size_ = 0.1;
-  hand_offset_ = 0.15;
+  hand_offset_ = 0.16;
   gripper_open_ = 0.08;
   gripper_closed_ = 0.0;
   grasp_stanby_height_ = 0.1;
@@ -241,24 +239,18 @@ PointCPtr cw2::getFilteredPointCloud() {
   ROS_INFO("Color filtering: kept %lu of %lu points", 
            color_filtered_cloud->points.size(), cloud_base->points.size());
 
-  // Comment out voxel grid downsampling to use original point density
-  /*
   // Apply voxel grid filter to downsample
   pcl::VoxelGrid<PointT> voxel_filter;
   PointCPtr cloud_filtered(new PointC);
   voxel_filter.setInputCloud(color_filtered_cloud);
   voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 5mm voxel size
   voxel_filter.filter(*cloud_filtered);
-  */
-  
-  // Use color filtered cloud directly without downsampling
-  PointCPtr cloud_filtered = color_filtered_cloud;
   
   // Remove NaN points
   std::vector<int> indices;
   pcl::removeNaNFromPointCloud(*cloud_filtered, *cloud_filtered, indices);
   
-  ROS_INFO("Final filtered point cloud: %lu points", cloud_filtered->points.size());
+  ROS_INFO("After voxel grid filtering: %lu points", cloud_filtered->points.size());
   
   return cloud_filtered;
 }
@@ -372,8 +364,8 @@ ObjectOrientationData cw2::determineObjectOrientation(
     const std::string &shape_type) {
   
   ROS_INFO("\n====== DETERMINING OBJECT ORIENTATION ======");
-  ROS_INFO("Determining object orientation for shape type: %s", shape_type.c_str());
   
+  // 初始化结果结构
   ObjectOrientationData result;
   result.is_valid = false;
   
@@ -393,34 +385,28 @@ ObjectOrientationData cw2::determineObjectOrientation(
   ROS_INFO("PCA eigenvalues: [%f, %f, %f]", 
            eigenvalues[0], eigenvalues[1], eigenvalues[2]);
   
+  Eigen::Vector3f grasp_direction;
+  float grasp_angle;
+
   if (shape_type == "cross") {
-    // For cross, use the principal component (largest variance)
-    result.primary_axis = eigenvectors.col(0);
-    // Calculate Z-axis rotation angle
-    result.grasp_angle = atan2(result.primary_axis[1], result.primary_axis[0]);
-    ROS_INFO("Cross shape: Detected primary axis [%f, %f, %f]", 
-             result.primary_axis[0], result.primary_axis[1], result.primary_axis[2]);
-    ROS_INFO("Computed grasp angle: %f radians (%.1f degrees)", 
-             result.grasp_angle, result.grasp_angle * 180.0/M_PI);
-  } else {  // "nought"
-    // For nought, normal is the third principal component (smallest variance)
-    result.primary_axis = eigenvectors.col(2);
-    // For corner grasping, we need the first principal axis
-    result.secondary_axis = eigenvectors.col(0);
-    // Calculate Z-axis rotation angle from first principal axis
-    result.grasp_angle = atan2(result.secondary_axis[1], result.secondary_axis[0]);
-    ROS_INFO("Nought shape: Detected normal [%f, %f, %f]", 
-             result.primary_axis[0], result.primary_axis[1], result.primary_axis[2]);
-    ROS_INFO("Detected corner axis [%f, %f, %f]", 
-             result.secondary_axis[0], result.secondary_axis[1], result.secondary_axis[2]);
-    ROS_INFO("Computed grasp angle: %f radians (%.1f degrees)", 
-             result.grasp_angle, result.grasp_angle * 180.0/M_PI);
+    Eigen::Vector3f primary_axis = eigenvectors.col(0);
+    grasp_direction = primary_axis;
+    grasp_angle = atan2(primary_axis[1], primary_axis[0]) + M_PI;
+  } else { // "nought"
+    Eigen::Vector3f primary_axis = eigenvectors.col(2);
+    Eigen::Vector3f secondary_axis = eigenvectors.col(0);
+    
+    Eigen::Vector3f edge_direction;
+    edge_direction[0] = primary_axis[0] + secondary_axis[0];
+    edge_direction[1] = primary_axis[1] + secondary_axis[1];
+    edge_direction[2] = 0.0f;
+    edge_direction.normalize();
+    
+    grasp_direction = edge_direction;
+    grasp_angle = atan2(edge_direction[1], edge_direction[0]) + M_PI/2;
   }
-  
-  result.is_valid = true;
-  ROS_INFO("====== ORIENTATION DETERMINATION COMPLETED ======\n");
-  
-  // PCA分析后调用可视化
+
+  // 在这里需要计算物体中心点，以用于可视化
   geometry_msgs::Point object_center;
   Eigen::Vector4f centroid;
   pcl::compute3DCentroid(*object_cloud, centroid);
@@ -428,7 +414,11 @@ ObjectOrientationData cw2::determineObjectOrientation(
   object_center.y = centroid[1];
   object_center.z = centroid[2];
   
-  visualizePCAAxes(eigenvectors, object_center, shape_type);
+  // 使用正确的变量名 object_center 替代 object_point
+  visualizePCAAxes(eigenvectors, object_center, shape_type, grasp_direction, grasp_angle);
+  
+  result.is_valid = true;
+  ROS_INFO("====== ORIENTATION DETERMINATION COMPLETED ======\n");
   
   return result;
 }
@@ -824,11 +814,13 @@ cw2::pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStam
   return;
 }
 
-// 实现可视化函数
+// Update visualization function to use pre-calculated grasp direction
 void cw2::visualizePCAAxes(
     const Eigen::Matrix3f &eigenvectors,
     const geometry_msgs::Point &center_point,
-    const std::string &shape_type) {
+    const std::string &shape_type,
+    const Eigen::Vector3f &grasp_direction,  // Pass in the actual grasp direction
+    float grasp_angle) {                     // Pass in the actual grasp angle
   
   // Skip visualization if not in debug mode
   if (!debug_) {
@@ -839,7 +831,7 @@ void cw2::visualizePCAAxes(
   
   visualization_msgs::MarkerArray marker_array;
   
-  // 为三个主轴创建箭头标记
+  // Create arrow markers for three principal axes
   for (int i = 0; i < 3; i++) {
     visualization_msgs::Marker marker;
     marker.header.frame_id = base_frame_;
@@ -849,10 +841,10 @@ void cw2::visualizePCAAxes(
     marker.type = visualization_msgs::Marker::ARROW;
     marker.action = visualization_msgs::Marker::ADD;
     
-    // 设置箭头起点为物体中心
+    // Set arrow starting point to object center
     marker.pose.position = center_point;
     
-    // 计算箭头方向四元数
+    // Calculate arrow direction quaternion
     Eigen::Vector3f axis = eigenvectors.col(i);
     Eigen::Vector3f z_axis(0, 0, 1);
     Eigen::Vector3f rotation_axis = z_axis.cross(axis);
@@ -869,14 +861,14 @@ void cw2::visualizePCAAxes(
       marker.pose.orientation.w = q.w();
     }
     
-    // 设置箭头尺寸
-    float scale_factor = 0.15;  // 主轴长度，可根据需要调整
-    marker.scale.x = scale_factor; // 箭头长度
-    marker.scale.y = 0.01;        // 箭头宽度
-    marker.scale.z = 0.01;        // 箭头高度
+    // Set arrow size
+    float scale_factor = 0.15;  // Principal axis length
+    marker.scale.x = scale_factor; // Arrow length
+    marker.scale.y = 0.01;        // Arrow width
+    marker.scale.z = 0.01;        // Arrow height
     
-    // 设置颜色 - 红色=第一主轴，绿色=第二主轴，蓝色=第三主轴
-    marker.color.a = 1.0;  // 不透明度
+    // Set color - Red=first axis, Green=second axis, Blue=third axis
+    marker.color.a = 1.0;  // Opacity
     if (i == 0) {
       marker.color.r = 1.0; marker.color.g = 0.0; marker.color.b = 0.0;
     } else if (i == 1) {
@@ -885,14 +877,14 @@ void cw2::visualizePCAAxes(
       marker.color.r = 0.0; marker.color.g = 0.0; marker.color.b = 1.0;
     }
     
-    // 设置持续时间 (0表示永久)
+    // Set duration (0 means permanent)
     marker.lifetime = ros::Duration(0);
     
-    // 添加到标记数组
+    // Add to marker array
     marker_array.markers.push_back(marker);
   }
   
-  // 添加指示夹取位置和方向的标记
+  // Add marker indicating grasp position and orientation
   visualization_msgs::Marker grasp_marker;
   grasp_marker.header.frame_id = base_frame_;
   grasp_marker.header.stamp = ros::Time::now();
@@ -901,24 +893,14 @@ void cw2::visualizePCAAxes(
   grasp_marker.type = visualization_msgs::Marker::ARROW;
   grasp_marker.action = visualization_msgs::Marker::ADD;
   
-  // 在determineObjectOrientation函数中调用
+  // Use the passed-in grasp direction
   float distance = 0.08;
-  Eigen::Vector3f direction;
-  
-  if (shape_type == "cross") {
-    direction = eigenvectors.col(0); // 第一主轴
-    grasp_marker.scale.x = 0.12;     // 箭头长度
-  } else { // "nought"
-    direction = eigenvectors.col(0); // 抓取边缘方向
-    grasp_marker.scale.x = 0.12;     // 箭头长度
-  }
   
   grasp_marker.pose.position = center_point;
-  grasp_marker.pose.position.x += distance * direction[0];
-  grasp_marker.pose.position.y += distance * direction[1];
+  grasp_marker.pose.position.x += distance * grasp_direction[0];
+  grasp_marker.pose.position.y += distance * grasp_direction[1];
   
-  // 设置抓取方向
-  float grasp_angle = atan2(direction[1], direction[0]) + M_PI/2;
+  // Set the grasp orientation using passed angle
   tf2::Quaternion q;
   q.setRPY(0, 0, grasp_angle);
   grasp_marker.pose.orientation.x = q.x();
@@ -926,10 +908,11 @@ void cw2::visualizePCAAxes(
   grasp_marker.pose.orientation.z = q.z();
   grasp_marker.pose.orientation.w = q.w();
   
-  grasp_marker.scale.y = 0.02;    // 箭头宽度
-  grasp_marker.scale.z = 0.02;    // 箭头高度
+  grasp_marker.scale.x = 0.12;    // Arrow length
+  grasp_marker.scale.y = 0.02;    // Arrow width
+  grasp_marker.scale.z = 0.02;    // Arrow height
   
-  // 设置颜色 - 黄色表示抓取方向
+  // Set color - Yellow for grasp direction
   grasp_marker.color.r = 1.0;
   grasp_marker.color.g = 1.0;
   grasp_marker.color.b = 0.0;
@@ -939,7 +922,7 @@ void cw2::visualizePCAAxes(
   
   marker_array.markers.push_back(grasp_marker);
   
-  // 发布标记数组
+  // Publish marker array
   pca_axes_pub_.publish(marker_array);
-  ROS_INFO("PCA axes visualization published");
+  ROS_INFO("PCA axes and grasp direction visualization published");
 }

@@ -215,7 +215,9 @@ public:
   void visualizePCAAxes(
       const Eigen::Matrix3f &eigenvectors,
       const geometry_msgs::Point &center_point,
-      const std::string &shape_type);
+      const std::string &shape_type,
+      const Eigen::Vector3f &grasp_direction,
+      float grasp_angle);
 
   // Constructor and destructor
   ~cw2();
