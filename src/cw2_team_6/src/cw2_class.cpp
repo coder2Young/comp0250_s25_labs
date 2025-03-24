@@ -12,7 +12,11 @@ cw2::cw2(ros::NodeHandle nh):
   tf_listener_(tf_buffer_),
   cloud_(new PointC),
   collision_object_vector_(),
-  octomap_received_(false)
+  octomap_received_(false),
+  // Initialize scanning motion parameters
+  scan_radius_(0.2),          // 20cm radius around object 
+  scan_height_offset_(0.3),   // 30cm above object height
+  num_scan_poses_(4)          // 4 positions around the object
 {
   /* class constructor */
 
@@ -33,8 +37,8 @@ cw2::cw2(ros::NodeHandle nh):
   pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/pca_axes", 1, true);
   
   // Initialize OctoMap-related subscribers and clients
-  octomap_sub_ = nh_.subscribe("/octomap_full", 1, &cw2::octomap_callback, this);
-  octomap_client_ = nh_.serviceClient<octomap_msgs::GetOctomap>("/octomap_binary");
+  octomap_sub_ = nh_.subscribe("/octomap_binary", 1, &cw2::octomap_callback, this);
+  octomap_client_ = nh_.serviceClient<octomap_msgs::GetOctomap>("/octomap_full");
   
   ROS_INFO("cw2 class initialised");
 }
@@ -769,26 +773,32 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &goal_point) {
   return true;  // Return true even if home position fails, as the main task succeeded
 }
 
-void cw2::publishPointCloud(
-    const PointCPtr &cloud,
-    const ros::Publisher &publisher) {
-  
-  // Only proceed if in debug mode
-  if (!debug_) {
+// Publish point cloud for visualization
+void cw2::publishPointCloud(const PointCPtr &cloud, const ros::Publisher &publisher) {
+  if (cloud->empty()) {
+    ROS_WARN("Cannot publish empty point cloud");
     return;
   }
   
+  // Convert to ROS message
   sensor_msgs::PointCloud2 cloud_msg;
   pcl::toROSMsg(*cloud, cloud_msg);
   
-  // All point clouds are now in base_frame
-  cloud_msg.header.frame_id = base_frame_;
+  // Make sure the frame_id is preserved
+  if (cloud->header.frame_id.empty()) {
+    cloud_msg.header.frame_id = base_frame_;
+    ROS_WARN("Point cloud has no frame_id, using %s as default", base_frame_.c_str());
+  } else {
+    cloud_msg.header.frame_id = cloud->header.frame_id;
+    ROS_INFO("Publishing point cloud with frame_id: %s", cloud_msg.header.frame_id.c_str());
+  }
+  
+  // Set the timestamp
   cloud_msg.header.stamp = ros::Time::now();
   
+  // Publish
   publisher.publish(cloud_msg);
-  
-  ROS_INFO("Published point cloud with %lu points in frame %s", 
-           cloud->points.size(), cloud_msg.header.frame_id.c_str());
+  ROS_INFO("Published point cloud with %lu points", cloud->points.size());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1068,7 +1078,7 @@ void cw2::visualizePCAAxes(
 
 // Callback function for OctoMap messages
 void cw2::octomap_callback(const octomap_msgs::Octomap::ConstPtr& msg) {
-  ROS_INFO("Received OctoMap message");
+  // Silently process the OctoMap message without logging
   latest_octomap_ = *msg;
   octomap_received_ = true;
 }
@@ -1120,8 +1130,7 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
              i+1, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z);
   }
   
-  // Reset the OctoMap status
-  octomap_received_ = false;
+  int successful_scans = 0;
   
   // Move to each scan pose
   for (int i = 0; i < scan_poses.size(); i++) {
@@ -1134,11 +1143,16 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
     }
     
     // Wait a bit for the arm to stabilize
-    ros::Duration(0.5).sleep();
+    ros::Duration(1.0).sleep();
     
-    // Wait for new OctoMap message with timeout
+    // Reset the OctoMap status
+    octomap_received_ = false;
+    
+    // Attempt to get an OctoMap update at this position
     ros::Time start_time = ros::Time::now();
-    ros::Duration timeout(2.0); // 2-second timeout
+    ros::Duration timeout(5.0); // 5-second timeout
+    
+    ROS_INFO("Waiting for OctoMap update at position %d...", i+1);
     
     while (!octomap_received_ && ros::Time::now() - start_time < timeout) {
       ros::spinOnce();
@@ -1146,11 +1160,27 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
     }
     
     if (octomap_received_) {
-      ROS_INFO("OctoMap updated at scan position %d", i+1);
+      ROS_INFO("Successfully received OctoMap update at scan position %d with %d bytes of data",
+               i+1, (int)latest_octomap_.data.size());
+      successful_scans++;
     } else {
-      ROS_WARN("Timeout waiting for OctoMap update at scan position %d", i+1);
+      // Try calling the service directly if subscriber didn't work
+      ROS_WARN("Timeout waiting for OctoMap update from subscriber at scan position %d, trying service call",
+               i+1);
+      
+      octomap_msgs::GetOctomap srv;
+      if (octomap_client_.call(srv)) {
+        latest_octomap_ = srv.response.map;
+        octomap_received_ = true;
+        successful_scans++;
+        ROS_INFO("Successfully received OctoMap from service at scan position %d", i+1);
+      } else {
+        ROS_ERROR("Failed to receive OctoMap from service at scan position %d", i+1);
+      }
     }
   }
+  
+  ROS_INFO("Completed %d successful scans out of %lu positions", successful_scans, scan_poses.size());
   
   // Return to a position above the object
   geometry_msgs::PoseStamped top_pose;
@@ -1164,7 +1194,7 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
   bool success = moveArm(top_pose);
   
   ROS_INFO("====== SCANNING MOTION COMPLETED ======\n");
-  return success;
+  return successful_scans > 0;  // At least one successful scan is required
 }
 
 // Extract point cloud from OctoMap
@@ -1175,17 +1205,19 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
   
   // Try to get OctoMap from the service if we don't already have one
   if (!octomap_received_) {
-    ROS_INFO("Requesting OctoMap from service...");
+    ROS_INFO("No OctoMap received yet from subscriber, requesting from service...");
     octomap_msgs::GetOctomap srv;
     
     if (octomap_client_.call(srv)) {
       latest_octomap_ = srv.response.map;
       octomap_received_ = true;
-      ROS_INFO("Successfully received OctoMap from service");
+      ROS_INFO("Successfully received OctoMap from service with %d bytes of data", (int)latest_octomap_.data.size());
     } else {
-      ROS_ERROR("Failed to call OctoMap service");
+      ROS_ERROR("Failed to call OctoMap service. Is the octomap_server running?");
       return cloud;
     }
+  } else {
+    ROS_INFO("Using existing OctoMap from subscriber with %d bytes of data", (int)latest_octomap_.data.size());
   }
   
   // Convert OctoMap to octomap::OcTree
@@ -1203,6 +1235,9 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
     return cloud;
   }
   
+  ROS_INFO("OcTree created with resolution: %f and %lu nodes", 
+           octree->getResolution(), octree->size());
+  
   // Create point cloud from OcTree
   ROS_INFO("Converting OcTree to point cloud...");
   cloud->header.frame_id = latest_octomap_.header.frame_id;
@@ -1211,6 +1246,7 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
   cloud->is_dense = false;
   
   // Iterate through the octree
+  unsigned int count = 0;
   for (octomap::OcTree::leaf_iterator it = octree->begin_leafs(), end = octree->end_leafs(); it != end; ++it) {
     // Only consider occupied voxels
     if (octree->isNodeOccupied(*it)) {
@@ -1235,6 +1271,12 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
       // Add point to cloud
       cloud->points.push_back(point);
       cloud->width++;
+      
+      // Count points and provide progress updates
+      count++;
+      if (count % 10000 == 0) {
+        ROS_INFO("Processed %u points so far", count);
+      }
     }
   }
   
@@ -1245,7 +1287,8 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
   
   // If we don't have enough points, use the camera point cloud as fallback
   if (cloud->points.size() < 100) {
-    ROS_WARN("Not enough points from OctoMap, falling back to camera point cloud");
+    ROS_WARN("Not enough points from OctoMap (%lu), falling back to camera point cloud", 
+             cloud->points.size());
     cloud = getFilteredPointCloud();
   }
   

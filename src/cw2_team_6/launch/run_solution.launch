@@ -13,6 +13,9 @@
 		<arg name="models_dir" value="$(arg models_dir)"/>
 	</include>
 	
+	<!-- Launch OctoMap server with proper configuration -->
+	<include file="$(find cw2_team_6)/launch/octomap_setup.launch" />
+	
 	<!-- launch the cw solving node, change pkg to your team name here! -->
   <node pkg="cw2_team_6"
         name="cw2_solution_node"
