@@ -55,6 +55,13 @@ solution is contained within the cw2_team_<your_team_number> package */
 // Add marker array for PCA visualization
 #include <visualization_msgs/MarkerArray.h>
 
+// OctoMap specific includes
+#include <octomap_msgs/Octomap.h>
+#include <octomap_msgs/GetOctomap.h>
+#include <octomap_msgs/conversions.h>
+#include <octomap_ros/conversions.h>
+#include <octomap/octomap.h>
+
 // include services from the spawner package - we will be responding to these
 #include "cw2_world_spawner/Task1Service.h"
 #include "cw2_world_spawner/Task2Service.h"
@@ -92,6 +99,7 @@ typedef enum {
 struct ObjectOrientationData {
   Eigen::Vector3f primary_axis;    // Main orientation vector (largest variance for cross, normal for nought)
   Eigen::Vector3f secondary_axis;  // Secondary axis for nought shape (used for corner grasping)
+  Eigen::Vector3f edge_direction;  // Optimal edge direction for grasping nought objects
   float grasp_angle;               // Computed angle for gripper rotation around Z
   bool is_valid;                   // Indicates if the orientation data is valid
 };
@@ -186,12 +194,24 @@ public:
   ros::Publisher cloud_object_pub_;
   ros::Publisher pca_axes_pub_;  // For visualizing PCA axes
 
+  // OctoMap related members
+  ros::Subscriber octomap_sub_;
+  ros::ServiceClient octomap_client_;
+  octomap_msgs::Octomap latest_octomap_;
+  bool octomap_received_;
+  
   // Task 1 methods
   bool executeTask1(const cw2_world_spawner::Task1Service::Request &req, 
                     cw2_world_spawner::Task1Service::Response &res);
   
   // Methods for object orientation detection
   bool moveToScanPosition(const geometry_msgs::Point &target_point);
+  
+  // New methods for scanning motion and octomap handling
+  void octomap_callback(const octomap_msgs::Octomap::ConstPtr& msg);
+  bool performScanningMotion(const geometry_msgs::Point &target_point);
+  PointCPtr extractPointCloudFromOctomap();
+  
   PointCPtr getFilteredPointCloud();
   PointCPtr extractObjectPointCloud(
       PointCPtr cloud,
@@ -223,6 +243,11 @@ public:
   ~cw2();
 
   PointCPtr current_object_cloud_;  // Store the current object cloud
+  
+  // Scanning motion parameters
+  int num_scan_poses_;
+  float scan_radius_;
+  float scan_height_offset_;
 
 private:
   // Euclidean clustering parameters

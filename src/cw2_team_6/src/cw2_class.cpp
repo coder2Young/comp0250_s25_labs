@@ -11,7 +11,8 @@ cw2::cw2(ros::NodeHandle nh):
   tf_buffer_(),
   tf_listener_(tf_buffer_),
   cloud_(new PointC),
-  collision_object_vector_()
+  collision_object_vector_(),
+  octomap_received_(false)
 {
   /* class constructor */
 
@@ -30,6 +31,10 @@ cw2::cw2(ros::NodeHandle nh):
   cloud_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_filtered", 1, true);
   cloud_object_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_object", 1, true);
   pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/pca_axes", 1, true);
+  
+  // Initialize OctoMap-related subscribers and clients
+  octomap_sub_ = nh_.subscribe("/octomap_full", 1, &cw2::octomap_callback, this);
+  octomap_client_ = nh_.serviceClient<octomap_msgs::GetOctomap>("/octomap_binary");
   
   ROS_INFO("cw2 class initialised");
 }
@@ -51,7 +56,7 @@ cw2::cw2_config()
 
   box_size_ = 0.04;
   basket_size_ = 0.1;
-  hand_offset_ = 0.16;
+  hand_offset_ = 0.15;
   gripper_open_ = 0.08;
   gripper_closed_ = 0.0;
   grasp_stanby_height_ = 0.1;
@@ -82,6 +87,11 @@ cw2::cw2_config()
   cluster_tolerance_ = 0.02;    // 2cm tolerance between points in cluster
   min_cluster_size_ = 50;       // Minimum 50 points per cluster
   max_cluster_size_ = 25000;    // Maximum 25000 points per cluster
+  
+  // Scanning motion parameters
+  num_scan_poses_ = 4;          // Number of scan poses around the object
+  scan_radius_ = 0.1;          // Distance from object center (25 cm)
+  scan_height_offset_ = 0.5;    // Height above the object (50 cm)
 
   return;
 }
@@ -115,18 +125,46 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   ROS_INFO("Shape type: %s", shape_type.c_str());
   ROS_INFO("==========================\n");
   
-  // 1. Move to scanning position
+  // 1. Move to initial scanning position above the object
   bool scan_success = moveToScanPosition(object_point.point);
   
-  // 2. Get filtered point cloud
+  // 2. Perform scanning motion around the object to collect better point cloud data
+  bool motion_success = performScanningMotion(object_point.point);
+  
+  // 3. Extract point cloud from OctoMap
+  PointCPtr full_cloud = extractPointCloudFromOctomap();
+  
+  // 4. Filter the point cloud and publish for visualization
   PointCPtr filtered_cloud = getFilteredPointCloud();
+  
+  // Combine point clouds if both are available and not empty
+  if (full_cloud->points.size() > 0 && filtered_cloud->points.size() > 0) {
+    ROS_INFO("Combining point clouds from OctoMap and camera...");
+    
+    // Copy points from filtered_cloud to full_cloud
+    *full_cloud += *filtered_cloud;
+    
+    // Apply voxel grid filter to downsample the combined cloud
+    pcl::VoxelGrid<PointT> voxel_filter;
+    PointCPtr combined_cloud(new PointC);
+    voxel_filter.setInputCloud(full_cloud);
+    voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 5mm voxel size
+    voxel_filter.filter(*combined_cloud);
+    
+    // Remove NaN points
+    std::vector<int> indices;
+    pcl::removeNaNFromPointCloud(*combined_cloud, *combined_cloud, indices);
+    
+    filtered_cloud = combined_cloud;
+    ROS_INFO("Combined cloud has %lu points", filtered_cloud->points.size());
+  }
   
   // Publish filtered cloud only in debug mode
   if (debug_) {
     publishPointCloud(filtered_cloud, cloud_filtered_pub_);
   }
   
-  // 3. Extract object from point cloud
+  // 5. Extract object from point cloud
   PointCPtr object_cloud = 
       extractObjectPointCloud(filtered_cloud, object_point.point);
   
@@ -135,15 +173,15 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
     publishPointCloud(object_cloud, cloud_object_pub_);
   }
   
-  // 4. Determine object orientation
+  // 6. Determine object orientation
   ObjectOrientationData orientation_data = 
       determineObjectOrientation(object_cloud, shape_type);
   
-  // 5. Plan and execute grasp
+  // 7. Plan and execute grasp
   bool grasp_success = 
       planAndExecuteGrasp(object_point.point, orientation_data, shape_type);
   
-  // 6. Plan and execute place
+  // 8. Plan and execute place
   bool place_success = planAndExecutePlace(goal_point.point);
 
   ROS_INFO("\n====== TASK 1 COMPLETED ======\n");
@@ -228,7 +266,12 @@ PointCPtr cw2::getFilteredPointCloud() {
                  
     bool isBlack = (r < 0.2f) && (g < 0.2f) && (b < 0.2f);
 
-    if (isPurple || isRed || isBlue || isBlack) {
+    // Add check for brown color [0.5, 0.2, 0.2] with ±0.1 tolerance
+    bool isBrown = (r > 0.4f && r < 0.6f) &&
+                  (g > 0.1f && g < 0.3f) &&
+                  (b > 0.1f && b < 0.3f);
+
+    if (isPurple || isRed || isBlue || isBlack || isBrown) {
       color_filtered_cloud->points.push_back(pt);
     }
   }
@@ -271,10 +314,17 @@ PointCPtr cw2::extractObjectPointCloud(
     float g = static_cast<float>(pt.g) / 255.0f;
     float b = static_cast<float>(pt.b) / 255.0f;
     
+    // Check if the color is green (which would be the ground)
     bool isGreen = (g > 0.4f && g > r * 1.5 && g > b * 1.5) || 
                    (g > 0.5f && (r < 0.35f || b < 0.35f));
     
-    if (!isGreen) {
+    // Check if the color is brown (which we want to keep)
+    bool isBrown = (r > 0.4f && r < 0.6f) &&
+                  (g > 0.1f && g < 0.3f) &&
+                  (b > 0.1f && b < 0.3f);
+    
+    // Keep the point if it's not green or if it's brown
+    if (!isGreen || isBrown) {
       color_filtered_cloud->points.push_back(pt);
     }
   }
@@ -365,18 +415,43 @@ ObjectOrientationData cw2::determineObjectOrientation(
   
   ROS_INFO("\n====== DETERMINING OBJECT ORIENTATION ======");
   
-  // 初始化结果结构
+  // Initialize result structure
   ObjectOrientationData result;
   result.is_valid = false;
   
-  if (object_cloud->points.size() < 3) {
-    ROS_ERROR("Not enough points for PCA analysis");
+  if (object_cloud->points.size() < 10) {
+    ROS_ERROR("Not enough points for PCA analysis: %lu points", object_cloud->points.size());
     return result;
   }
   
-  // Perform PCA on the object cloud
+  ROS_INFO("Performing PCA analysis on object cloud with %lu points", object_cloud->points.size());
+  
+  // Compute the centroid of the object first
+  Eigen::Vector4f centroid;
+  pcl::compute3DCentroid(*object_cloud, centroid);
+  
+  // Remove points that might be from the ground plane using height filtering
+  PointCPtr filtered_cloud(new PointC);
+  float min_height = centroid[2] - 0.02; // 2cm below centroid
+  
+  for (const auto& point : object_cloud->points) {
+    if (point.z > min_height) {
+      filtered_cloud->points.push_back(point);
+    }
+  }
+  
+  filtered_cloud->width = filtered_cloud->points.size();
+  filtered_cloud->height = 1;
+  filtered_cloud->is_dense = true;
+  
+  ROS_INFO("After height filtering: %lu points", filtered_cloud->points.size());
+  
+  // Recalculate centroid after filtering
+  pcl::compute3DCentroid(*filtered_cloud, centroid);
+  
+  // Perform PCA on the filtered cloud
   pcl::PCA<PointT> pca;
-  pca.setInputCloud(object_cloud);
+  pca.setInputCloud(filtered_cloud);
   
   // Get eigenvalues and eigenvectors
   Eigen::Vector3f eigenvalues = pca.getEigenValues();
@@ -385,39 +460,100 @@ ObjectOrientationData cw2::determineObjectOrientation(
   ROS_INFO("PCA eigenvalues: [%f, %f, %f]", 
            eigenvalues[0], eigenvalues[1], eigenvalues[2]);
   
+  // Calculate eigenvalue ratios to better understand the shape
+  float ratio_1_2 = eigenvalues[0] / eigenvalues[1];
+  float ratio_2_3 = eigenvalues[1] / eigenvalues[2];
+  
+  ROS_INFO("Eigenvalue ratios - λ1/λ2: %f, λ2/λ3: %f", ratio_1_2, ratio_2_3);
+  
+  // Setup result variables
+  Eigen::Vector3f primary_axis, secondary_axis;
   Eigen::Vector3f grasp_direction;
   float grasp_angle;
-
+  
   if (shape_type == "cross") {
-    Eigen::Vector3f primary_axis = eigenvectors.col(0);
-    grasp_direction = primary_axis;
-    grasp_angle = atan2(primary_axis[1], primary_axis[0]) + M_PI;
-  } else { // "nought"
-    Eigen::Vector3f primary_axis = eigenvectors.col(2);
-    Eigen::Vector3f secondary_axis = eigenvectors.col(0);
+    ROS_INFO("Analyzing cross shape...");
     
+    // For cross shape, the largest eigenvalue should be significantly larger
+    if (ratio_1_2 < 1.5) {
+      ROS_WARN("Cross shape expected but eigenvalue ratio λ1/λ2 = %f is low", ratio_1_2);
+      ROS_WARN("This might affect grasp orientation accuracy");
+    }
+    
+    // Primary axis is the direction of largest variance
+    primary_axis = eigenvectors.col(0);
+    
+    // Make sure primary axis is in the XY plane (horizontal)
+    primary_axis[2] = 0.0f;
+    primary_axis.normalize();
+    
+    // Secondary axis is perpendicular to primary in the XY plane
+    secondary_axis = Eigen::Vector3f(-primary_axis[1], primary_axis[0], 0.0f);
+    
+    // For cross, grasp along one arm
+    grasp_direction = primary_axis;
+    grasp_angle = atan2(primary_axis[1], primary_axis[0]) + M_PI; // Full 180-degree rotation
+    
+    ROS_INFO("Cross primary axis: [%f, %f, %f]", 
+             primary_axis[0], primary_axis[1], primary_axis[2]);
+    ROS_INFO("Cross grasp angle: %f degrees", grasp_angle * 180.0/M_PI);
+  } 
+  else { // "nought"
+    ROS_INFO("Analyzing nought (ring) shape...");
+    
+    // For ring shape, the smallest eigenvalue should be much smaller (normal to the plane)
+    if (ratio_2_3 < 1.5) {
+      ROS_WARN("Ring shape expected but eigenvalue ratio λ2/λ3 = %f is low", ratio_2_3);
+      ROS_WARN("This might affect grasp orientation accuracy");
+    }
+    
+    // Since we know the object is flat on the ground, enforce vertical normal
+    primary_axis = Eigen::Vector3f(0.0f, 0.0f, 1.0f);
+    
+    // First principal axis in the XY plane (largest variance direction)
+    secondary_axis = eigenvectors.col(0);
+    secondary_axis[2] = 0.0f;  // Project onto XY plane
+    secondary_axis.normalize();
+    
+    // For optimal grasping of a square ring, calculate an edge direction
+    // Using a 45-degree angle between the principal axes in the plane gives good results
     Eigen::Vector3f edge_direction;
-    edge_direction[0] = primary_axis[0] + secondary_axis[0];
-    edge_direction[1] = primary_axis[1] + secondary_axis[1];
-    edge_direction[2] = 0.0f;
+    edge_direction[0] = secondary_axis[0] + eigenvectors.col(1)[0];
+    edge_direction[1] = secondary_axis[1] + eigenvectors.col(1)[1];
+    edge_direction[2] = 0.0f; // Keep it in the horizontal plane
     edge_direction.normalize();
     
+    // Store this edge direction for grasp point calculation
     grasp_direction = edge_direction;
-    grasp_angle = atan2(edge_direction[1], edge_direction[0]) + M_PI/2;
+    
+    // Set grasp angle perpendicular to the edge for better grip
+    grasp_angle = atan2(edge_direction[1], edge_direction[0]) + M_PI/2; // Add 90 degrees
+    
+    ROS_INFO("Ring orientation - Normal: [%f, %f, %f]", 
+             primary_axis[0], primary_axis[1], primary_axis[2]);
+    ROS_INFO("Ring in-plane principal axis: [%f, %f, %f]", 
+             secondary_axis[0], secondary_axis[1], secondary_axis[2]);
+    ROS_INFO("Ring edge direction (for grasping): [%f, %f, %f]", 
+             edge_direction[0], edge_direction[1], edge_direction[2]);
+    ROS_INFO("Ring grasp angle: %f degrees", grasp_angle * 180.0/M_PI);
   }
-
-  // 在这里需要计算物体中心点，以用于可视化
+  
+  // Set object center point for visualization
   geometry_msgs::Point object_center;
-  Eigen::Vector4f centroid;
-  pcl::compute3DCentroid(*object_cloud, centroid);
   object_center.x = centroid[0];
   object_center.y = centroid[1];
   object_center.z = centroid[2];
   
-  // 使用正确的变量名 object_center 替代 object_point
+  // Visualize the PCA axes and grasp direction
   visualizePCAAxes(eigenvectors, object_center, shape_type, grasp_direction, grasp_angle);
   
+  // Set result fields
+  result.primary_axis = primary_axis;
+  result.secondary_axis = secondary_axis;
+  result.grasp_angle = grasp_angle;
+  result.edge_direction = grasp_direction;
   result.is_valid = true;
+  
   ROS_INFO("====== ORIENTATION DETERMINATION COMPLETED ======\n");
   
   return result;
@@ -449,54 +585,51 @@ bool cw2::planAndExecuteGrasp(
   tf2::Quaternion q_z;
   
   if (shape_type == "cross") {
-    // For cross objects, grasp along one arm, near the outer edge
-    float arm_length = 0.08; // 80mm - move 2 cubes out from center
+    // For cross objects, grasp along one arm
+    // Use a smaller distance from center for more stability
+    float arm_length = 0.06; // 60mm - just far enough to reach arm edge
     
-    // Set grasp angle perpendicular to the arm with extra 90-degree rotation for proper gripper alignment
-    float grasp_angle = atan2(orientation_data.primary_axis[1], orientation_data.primary_axis[0]) + M_PI; // Full 180-degree rotation
-    q_z.setRPY(0, 0, grasp_angle);
+    // Set grasp angle based on the computed orientation
+    q_z.setRPY(0, 0, orientation_data.grasp_angle);
     
-    // Move from center along arm direction
+    // Move from center along primary axis direction
     grasp_pose.pose.position = object_point;
     grasp_pose.pose.position.x += arm_length * orientation_data.primary_axis[0];
     grasp_pose.pose.position.y += arm_length * orientation_data.primary_axis[1];
-    grasp_pose.pose.position.z += hand_offset_;
+    
+    // Adjust height slightly based on center point to ensure good grasp
+    grasp_pose.pose.position.z = object_point.z + hand_offset_ + 0.01; // 1cm above object
     
     ROS_INFO("Cross grasp strategy:");
     ROS_INFO("- Grasping along arm at distance %.1f mm from center", arm_length * 1000);
-    ROS_INFO("- Gripper perpendicular to arm at angle %.1f degrees", grasp_angle * 180.0/M_PI);
+    ROS_INFO("- Gripper angle: %.1f degrees", orientation_data.grasp_angle * 180.0/M_PI);
     ROS_INFO("- Grasp point: [%f, %f, %f]", 
              grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
   } 
   else { // "nought"
-    // For ring-shaped objects, grasp the middle of an edge
-    // Use 45-degree angle between primary and secondary axes (diagonal directions)
+    // For ring-shaped objects, grasp at an edge
+    // The distance needs to be precise to hit the edge
+    float edge_distance = 0.08; // 80mm - distance to the ring edge
     
-    // Calculate the 45-degree direction between primary and secondary axes
-    Eigen::Vector3f edge_direction;
-    edge_direction[0] = orientation_data.primary_axis[0] + orientation_data.secondary_axis[0];
-    edge_direction[1] = orientation_data.primary_axis[1] + orientation_data.secondary_axis[1];
-    edge_direction[2] = 0.0f; // Keep it in the horizontal plane
-    edge_direction.normalize();
+    // Set grasp angle perpendicular to the edge
+    q_z.setRPY(0, 0, orientation_data.grasp_angle);
     
-    // Use 100mm distance to reach the edge from center
-    float edge_distance = 0.1; // 100mm
+    // Use the pre-calculated edge direction from orientation_data
+    const Eigen::Vector3f& edge_direction = orientation_data.edge_direction;
     
-    // Set grasp angle perpendicular to the edge for better grip (add 90 degrees)
-    float grasp_angle = atan2(edge_direction[1], edge_direction[0]) + M_PI/2;
-    q_z.setRPY(0, 0, grasp_angle);
-    
-    // Move from center along the 45-degree direction
+    // Set grasp position by moving from center along the edge direction
     grasp_pose.pose.position = object_point;
     grasp_pose.pose.position.x += edge_distance * edge_direction[0];
     grasp_pose.pose.position.y += edge_distance * edge_direction[1];
-    grasp_pose.pose.position.z += hand_offset_;
+    
+    // Adjust height slightly based on center point
+    grasp_pose.pose.position.z = object_point.z + hand_offset_ + 0.01; // 1cm above object
     
     ROS_INFO("Square ring grasp strategy:");
-    ROS_INFO("- Using 45-degree direction between principal axes");
-    ROS_INFO("- Direction vector: [%.2f, %.2f]", edge_direction[0], edge_direction[1]);
-    ROS_INFO("- Grasping at distance %.1f mm from center", edge_distance * 1000);
-    ROS_INFO("- Gripper perpendicular to edge at angle %.1f degrees", grasp_angle * 180.0/M_PI);
+    ROS_INFO("- Grasping at edge, distance %.1f mm from center along optimal edge direction", edge_distance * 1000);
+    ROS_INFO("- Edge direction: [%.2f, %.2f, %.2f]", 
+             edge_direction[0], edge_direction[1], edge_direction[2]);
+    ROS_INFO("- Gripper angle: %.1f degrees", orientation_data.grasp_angle * 180.0/M_PI);
     ROS_INFO("- Grasp point: [%f, %f, %f]", 
              grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
   }
@@ -541,15 +674,21 @@ bool cw2::planAndExecuteGrasp(
     return false;
   }
   
+  // Slow approach for better precision
+  arm_group_.setMaxVelocityScalingFactor(0.3);
+  
   // Move to grasp position
   ROS_INFO("Moving to grasp position...");
   ROS_INFO("Grasp position: [%f, %f, %f]", 
            grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
   success = moveArm(grasp_pose);
   
-  // Close gripper
+  // Close gripper with increased force for secure grasp
   ROS_INFO("Closing gripper to grasp object...");
-  moveGripper(gripper_closed_);
+  moveGripper(gripper_closed_, 1.0); // 1 second wait time for firm grasp
+  
+  // Reset velocity scaling
+  arm_group_.setMaxVelocityScalingFactor(1.0);
   
   ROS_INFO("==== Grasp position: [%f, %f, %f] ====", 
            grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
@@ -925,4 +1064,191 @@ void cw2::visualizePCAAxes(
   // Publish marker array
   pca_axes_pub_.publish(marker_array);
   ROS_INFO("PCA axes and grasp direction visualization published");
+}
+
+// Callback function for OctoMap messages
+void cw2::octomap_callback(const octomap_msgs::Octomap::ConstPtr& msg) {
+  ROS_INFO("Received OctoMap message");
+  latest_octomap_ = *msg;
+  octomap_received_ = true;
+}
+
+// Perform scanning motion around the object to collect better point cloud data
+bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
+  ROS_INFO("\n====== PERFORMING SCANNING MOTION ======");
+  ROS_INFO("Starting scanning motion around object at [%f, %f, %f]",
+           target_point.x, target_point.y, target_point.z);
+  
+  // Create a set of poses around the object
+  std::vector<geometry_msgs::PoseStamped> scan_poses;
+  
+  // Height of camera during scanning - use a consistent height
+  float scan_z = target_point.z + scan_height_offset_;
+  
+  // Convert the pre-defined downward-facing orientation to tf2::Quaternion
+  tf2::Quaternion q_base;
+  tf2::convert(grasp_orientation_, q_base);
+  
+  // Generate 4 positions in a square pattern around the object
+  const int num_positions = 4;
+  for (int i = 0; i < num_positions; i++) {
+    float angle = 2.0f * M_PI * i / num_positions; // 0, 90, 180, 270 degrees
+    float x = target_point.x + scan_radius_ * cos(angle);
+    float y = target_point.y + scan_radius_ * sin(angle);
+    
+    // Create scan pose
+    geometry_msgs::PoseStamped pose;
+    pose.header.frame_id = base_frame_;
+    pose.pose.position.x = x;
+    pose.pose.position.y = y;
+    pose.pose.position.z = scan_z;
+    
+    // Create quaternion for Z rotation based on the scan angle
+    tf2::Quaternion q_z;
+    q_z.setRPY(0, 0, angle);  // Rotate around Z by the scan angle
+    
+    // Combine rotations (same method as in grasping)
+    tf2::Quaternion q_rot = q_z * q_base;
+    q_rot.normalize();
+    
+    // Convert to geometry_msgs quaternion
+    tf2::convert(q_rot, pose.pose.orientation);
+    
+    scan_poses.push_back(pose);
+    
+    ROS_INFO("Scan position %d: [%f, %f, %f] with combined orientation",
+             i+1, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z);
+  }
+  
+  // Reset the OctoMap status
+  octomap_received_ = false;
+  
+  // Move to each scan pose
+  for (int i = 0; i < scan_poses.size(); i++) {
+    ROS_INFO("Moving to scan position %d/%lu", i+1, scan_poses.size());
+    
+    bool success = moveArm(scan_poses[i]);
+    if (!success) {
+      ROS_WARN("Failed to move to scan position %d, trying next position", i+1);
+      continue;
+    }
+    
+    // Wait a bit for the arm to stabilize
+    ros::Duration(0.5).sleep();
+    
+    // Wait for new OctoMap message with timeout
+    ros::Time start_time = ros::Time::now();
+    ros::Duration timeout(2.0); // 2-second timeout
+    
+    while (!octomap_received_ && ros::Time::now() - start_time < timeout) {
+      ros::spinOnce();
+      ros::Duration(0.1).sleep();
+    }
+    
+    if (octomap_received_) {
+      ROS_INFO("OctoMap updated at scan position %d", i+1);
+    } else {
+      ROS_WARN("Timeout waiting for OctoMap update at scan position %d", i+1);
+    }
+  }
+  
+  // Return to a position above the object
+  geometry_msgs::PoseStamped top_pose;
+  top_pose.header.frame_id = base_frame_;
+  top_pose.pose.position.x = target_point.x;
+  top_pose.pose.position.y = target_point.y;
+  top_pose.pose.position.z = target_point.z + scan_height_;
+  top_pose.pose.orientation = grasp_orientation_;
+  
+  ROS_INFO("Returning to position above object");
+  bool success = moveArm(top_pose);
+  
+  ROS_INFO("====== SCANNING MOTION COMPLETED ======\n");
+  return success;
+}
+
+// Extract point cloud from OctoMap
+PointCPtr cw2::extractPointCloudFromOctomap() {
+  ROS_INFO("\n====== EXTRACTING POINT CLOUD FROM OCTOMAP ======");
+  
+  PointCPtr cloud(new PointC);
+  
+  // Try to get OctoMap from the service if we don't already have one
+  if (!octomap_received_) {
+    ROS_INFO("Requesting OctoMap from service...");
+    octomap_msgs::GetOctomap srv;
+    
+    if (octomap_client_.call(srv)) {
+      latest_octomap_ = srv.response.map;
+      octomap_received_ = true;
+      ROS_INFO("Successfully received OctoMap from service");
+    } else {
+      ROS_ERROR("Failed to call OctoMap service");
+      return cloud;
+    }
+  }
+  
+  // Convert OctoMap to octomap::OcTree
+  octomap::AbstractOcTree* abstract_tree = octomap_msgs::msgToMap(latest_octomap_);
+  if (!abstract_tree) {
+    ROS_ERROR("Failed to convert OctoMap message to OcTree");
+    return cloud;
+  }
+  
+  // Convert to OcTree
+  octomap::OcTree* octree = dynamic_cast<octomap::OcTree*>(abstract_tree);
+  if (!octree) {
+    ROS_ERROR("Failed to convert to OcTree");
+    delete abstract_tree;
+    return cloud;
+  }
+  
+  // Create point cloud from OcTree
+  ROS_INFO("Converting OcTree to point cloud...");
+  cloud->header.frame_id = latest_octomap_.header.frame_id;
+  cloud->width = 0;  // Will increment as we add points
+  cloud->height = 1;
+  cloud->is_dense = false;
+  
+  // Iterate through the octree
+  for (octomap::OcTree::leaf_iterator it = octree->begin_leafs(), end = octree->end_leafs(); it != end; ++it) {
+    // Only consider occupied voxels
+    if (octree->isNodeOccupied(*it)) {
+      // Get coordinates from OcTree node
+      float x = it.getX();
+      float y = it.getY();
+      float z = it.getZ();
+      
+      // Create a point
+      PointT point;
+      point.x = x;
+      point.y = y;
+      point.z = z;
+      
+      // Set default color (white) - we'll filter by color later
+      // In a real implementation, you might get color from RGB camera
+      point.r = 255;
+      point.g = 255;
+      point.b = 255;
+      point.a = 255;
+      
+      // Add point to cloud
+      cloud->points.push_back(point);
+      cloud->width++;
+    }
+  }
+  
+  ROS_INFO("Extracted %lu points from OctoMap", cloud->points.size());
+  
+  // Clean up
+  delete octree;
+  
+  // If we don't have enough points, use the camera point cloud as fallback
+  if (cloud->points.size() < 100) {
+    ROS_WARN("Not enough points from OctoMap, falling back to camera point cloud");
+    cloud = getFilteredPointCloud();
+  }
+  
+  ROS_INFO("====== POINT CLOUD EXTRACTION COMPLETED ======\n");
+  return cloud;
 }
