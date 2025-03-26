@@ -193,6 +193,7 @@ public:
   ros::Publisher cloud_filtered_pub_;
   ros::Publisher cloud_object_pub_;
   ros::Publisher pca_axes_pub_;  // For visualizing PCA axes
+  ros::Publisher filtered_cloud_for_octomap_pub_; // For OctoMap to subscribe to
 
   // OctoMap related members
   ros::Subscriber octomap_sub_;

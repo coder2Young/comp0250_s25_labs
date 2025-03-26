@@ -35,6 +35,8 @@ cw2::cw2(ros::NodeHandle nh):
   cloud_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_filtered", 1, true);
   cloud_object_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_object", 1, true);
   pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/pca_axes", 1, true);
+  // Use for debug visualization, not for OctoMap input
+  filtered_cloud_for_octomap_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/filtered_cloud", 1, true);
   
   // Initialize OctoMap-related subscribers and clients
   octomap_sub_ = nh_.subscribe("/octomap_binary", 1, &cw2::octomap_callback, this);
@@ -136,32 +138,11 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   bool motion_success = performScanningMotion(object_point.point);
   
   // 3. Extract point cloud from OctoMap
-  PointCPtr full_cloud = extractPointCloudFromOctomap();
+  PointCPtr point_cloud = extractPointCloudFromOctomap();
   
-  // 4. Filter the point cloud and publish for visualization
-  PointCPtr filtered_cloud = getFilteredPointCloud();
-  
-  // Combine point clouds if both are available and not empty
-  if (full_cloud->points.size() > 0 && filtered_cloud->points.size() > 0) {
-    ROS_INFO("Combining point clouds from OctoMap and camera...");
-    
-    // Copy points from filtered_cloud to full_cloud
-    *full_cloud += *filtered_cloud;
-    
-    // Apply voxel grid filter to downsample the combined cloud
-    pcl::VoxelGrid<PointT> voxel_filter;
-    PointCPtr combined_cloud(new PointC);
-    voxel_filter.setInputCloud(full_cloud);
-    voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 5mm voxel size
-    voxel_filter.filter(*combined_cloud);
-    
-    // Remove NaN points
-    std::vector<int> indices;
-    pcl::removeNaNFromPointCloud(*combined_cloud, *combined_cloud, indices);
-    
-    filtered_cloud = combined_cloud;
-    ROS_INFO("Combined cloud has %lu points", filtered_cloud->points.size());
-  }
+  // 4. Skip the camera point cloud, use only OctoMap data as per new strategy
+  // Note: We're no longer combining OctoMap and camera point clouds
+  PointCPtr filtered_cloud = point_cloud;
   
   // Publish filtered cloud only in debug mode
   if (debug_) {
@@ -210,144 +191,24 @@ bool cw2::moveToScanPosition(const geometry_msgs::Point &target_point) {
   return moveArm(scan_pose);
 }
 
-PointCPtr cw2::getFilteredPointCloud() {
-  ROS_INFO("Acquiring and filtering point cloud data");
-  
-  // Wait for point cloud message
-  sensor_msgs::PointCloud2ConstPtr cloud_msg = 
-      ros::topic::waitForMessage<sensor_msgs::PointCloud2>("/r200/camera/depth_registered/points", nh_, ros::Duration(5.0));
-  
-  if (!cloud_msg) {
-    ROS_ERROR("Failed to receive point cloud message");
-    return PointCPtr(new PointC);
-  }
-  
-  // Save the original frame ID for transformation
-  std::string camera_frame_id = cloud_msg->header.frame_id;
-  ROS_INFO("Received point cloud in frame: %s", camera_frame_id.c_str());
-  
-  // Convert ROS message to PCL point cloud (still in camera frame)
-  PointCPtr cloud_camera(new PointC);
-  pcl::fromROSMsg(*cloud_msg, *cloud_camera);
-  
-  // Transform the point cloud from camera frame to base frame
-  PointCPtr cloud_base(new PointC);
-  try {
-    // Look up transform from camera to base frame
-    geometry_msgs::TransformStamped transform_stamped;
-    transform_stamped = tf_buffer_.lookupTransform(
-      base_frame_, camera_frame_id, ros::Time(0), ros::Duration(1.0));
-    
-    // Apply transform to the point cloud
-    pcl_ros::transformPointCloud(*cloud_camera, *cloud_base, transform_stamped.transform);
-    ROS_INFO("Successfully transformed point cloud to %s frame", base_frame_.c_str());
-  } catch (tf2::TransformException &ex) {
-    ROS_ERROR("Transform lookup failed: %s", ex.what());
-    ROS_WARN("Continuing with untransformed cloud - results may be incorrect!");
-    cloud_base = cloud_camera; // Fallback to untransformed cloud
-  }
-  
-  // Filter by color - only keep red/blue/purple/black objects
-  PointCPtr color_filtered_cloud(new PointC);
-  color_filtered_cloud->header = cloud_base->header;
-  
-  for (const auto& pt : cloud_base->points) {
-    float r = static_cast<float>(pt.r) / 255.0f;
-    float g = static_cast<float>(pt.g) / 255.0f;
-    float b = static_cast<float>(pt.b) / 255.0f;
-
-    bool isPurple = (r > 0.7f && r < 0.9f) &&
-                   (g > 0.0f && g < 0.2f) &&
-                   (b > 0.7f && b < 0.9f);
-
-    bool isRed = (r > 0.7f && r < 0.9f) &&
-                (g > 0.0f && g < 0.2f) &&
-                (b > 0.0f && b < 0.2f);
-
-    bool isBlue = (r > 0.0f && r < 0.2f) &&
-                 (g > 0.0f && g < 0.2f) &&
-                 (b > 0.7f && b < 0.9f);
-                 
-    bool isBlack = (r < 0.2f) && (g < 0.2f) && (b < 0.2f);
-
-    // Add check for brown color [0.5, 0.2, 0.2] with ±0.1 tolerance
-    bool isBrown = (r > 0.4f && r < 0.6f) &&
-                  (g > 0.1f && g < 0.3f) &&
-                  (b > 0.1f && b < 0.3f);
-
-    if (isPurple || isRed || isBlue || isBlack || isBrown) {
-      color_filtered_cloud->points.push_back(pt);
-    }
-  }
-  
-  color_filtered_cloud->width = color_filtered_cloud->points.size();
-  color_filtered_cloud->height = 1;
-  
-  ROS_INFO("Color filtering: kept %lu of %lu points", 
-           color_filtered_cloud->points.size(), cloud_base->points.size());
-
-  // Apply voxel grid filter to downsample
-  pcl::VoxelGrid<PointT> voxel_filter;
-  PointCPtr cloud_filtered(new PointC);
-  voxel_filter.setInputCloud(color_filtered_cloud);
-  voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 5mm voxel size
-  voxel_filter.filter(*cloud_filtered);
-  
-  // Remove NaN points
-  std::vector<int> indices;
-  pcl::removeNaNFromPointCloud(*cloud_filtered, *cloud_filtered, indices);
-  
-  ROS_INFO("After voxel grid filtering: %lu points", cloud_filtered->points.size());
-  
-  return cloud_filtered;
-}
-
 PointCPtr cw2::extractObjectPointCloud(
     PointCPtr cloud,
     const geometry_msgs::Point &object_center) {
   
   ROS_INFO("\n====== EXTRACTING OBJECT POINT CLOUD ======");
-  ROS_INFO("Extracting object from point cloud using color filtering and clustering");
+  ROS_INFO("Extracting object from point cloud using clustering");
   
-  // Create output cloud for color filtering
-  PointCPtr color_filtered_cloud(new PointC);
+  // The input cloud is already color filtered, so we can proceed directly to clustering
   
-  // Filter by color - keep points that are not green (ground)
-  for (const auto& pt : cloud->points) {
-    float r = static_cast<float>(pt.r) / 255.0f;
-    float g = static_cast<float>(pt.g) / 255.0f;
-    float b = static_cast<float>(pt.b) / 255.0f;
-    
-    // Check if the color is green (which would be the ground)
-    bool isGreen = (g > 0.4f && g > r * 1.5 && g > b * 1.5) || 
-                   (g > 0.5f && (r < 0.35f || b < 0.35f));
-    
-    // Check if the color is brown (which we want to keep)
-    bool isBrown = (r > 0.4f && r < 0.6f) &&
-                  (g > 0.1f && g < 0.3f) &&
-                  (b > 0.1f && b < 0.3f);
-    
-    // Keep the point if it's not green or if it's brown
-    if (!isGreen || isBrown) {
-      color_filtered_cloud->points.push_back(pt);
-    }
-  }
-  
-  color_filtered_cloud->width = color_filtered_cloud->points.size();
-  color_filtered_cloud->height = 1;
-  color_filtered_cloud->is_dense = true;
-  
-  ROS_INFO("After color filtering: %lu points", color_filtered_cloud->points.size());
-  
-  // If no points after color filtering, return empty cloud
-  if (color_filtered_cloud->points.empty()) {
-    ROS_ERROR("No points after color filtering");
-    return color_filtered_cloud;
+  // If no points in the cloud, return empty cloud
+  if (cloud->points.empty()) {
+    ROS_ERROR("Input cloud has no points");
+    return PointCPtr(new PointC);
   }
   
   // Create KdTree for clustering
   pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
-  tree->setInputCloud(color_filtered_cloud);
+  tree->setInputCloud(cloud);
   
   // Extract Euclidean clusters
   std::vector<pcl::PointIndices> cluster_indices;
@@ -356,7 +217,7 @@ PointCPtr cw2::extractObjectPointCloud(
   ec.setMinClusterSize(min_cluster_size_);
   ec.setMaxClusterSize(max_cluster_size_);
   ec.setSearchMethod(tree);
-  ec.setInputCloud(color_filtered_cloud);
+  ec.setInputCloud(cloud);
   ec.extract(cluster_indices);
   
   ROS_INFO("Found %lu clusters", cluster_indices.size());
@@ -374,7 +235,7 @@ PointCPtr cw2::extractObjectPointCloud(
   for (size_t i = 0; i < cluster_indices.size(); i++) {
     // Calculate centroid of cluster
     Eigen::Vector4f centroid;
-    pcl::compute3DCentroid(*color_filtered_cloud, cluster_indices[i], centroid);
+    pcl::compute3DCentroid(*cloud, cluster_indices[i], centroid);
     
     // Calculate distance to expected object center
     float dx = centroid[0] - object_center.x;
@@ -395,7 +256,7 @@ PointCPtr cw2::extractObjectPointCloud(
   PointCPtr object_cloud(new PointC);
   if (best_cluster_idx >= 0) {
     for (const auto& idx : cluster_indices[best_cluster_idx].indices) {
-      object_cloud->points.push_back(color_filtered_cloud->points[idx]);
+      object_cloud->points.push_back(cloud->points[idx]);
     }
     object_cloud->width = object_cloud->points.size();
     object_cloud->height = 1;
@@ -1113,20 +974,12 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
     pose.pose.position.y = y;
     pose.pose.position.z = scan_z;
     
-    // Create quaternion for Z rotation based on the scan angle
-    tf2::Quaternion q_z;
-    q_z.setRPY(0, 0, angle);  // Rotate around Z by the scan angle
-    
-    // Combine rotations (same method as in grasping)
-    tf2::Quaternion q_rot = q_z * q_base;
-    q_rot.normalize();
-    
-    // Convert to geometry_msgs quaternion
-    tf2::convert(q_rot, pose.pose.orientation);
+    // Use consistent orientation for all scan positions
+    pose.pose.orientation = grasp_orientation_;
     
     scan_poses.push_back(pose);
     
-    ROS_INFO("Scan position %d: [%f, %f, %f] with combined orientation",
+    ROS_INFO("Scan position %d: [%f, %f, %f] with consistent orientation",
              i+1, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z);
   }
   
@@ -1261,8 +1114,7 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
       point.y = y;
       point.z = z;
       
-      // Set default color (white) - we'll filter by color later
-      // In a real implementation, you might get color from RGB camera
+      // Set default color (white) 
       point.r = 255;
       point.g = 255;
       point.b = 255;
@@ -1285,13 +1137,78 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
   // Clean up
   delete octree;
   
-  // If we don't have enough points, use the camera point cloud as fallback
+  // If we don't have enough points, return the empty cloud
   if (cloud->points.size() < 100) {
-    ROS_WARN("Not enough points from OctoMap (%lu), falling back to camera point cloud", 
+    ROS_WARN("Not enough points from OctoMap (%lu), returning empty cloud", 
              cloud->points.size());
-    cloud = getFilteredPointCloud();
+    return cloud;
+  }
+  
+  // Apply voxel grid filter to downsample
+  ROS_INFO("Applying voxel grid filtering for downsampling...");
+  pcl::VoxelGrid<PointT> voxel_filter;
+  PointCPtr downsampled_cloud(new PointC);
+  voxel_filter.setInputCloud(cloud);
+  voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 5mm voxel size
+  voxel_filter.filter(*downsampled_cloud);
+  
+  // Remove NaN points
+  std::vector<int> indices;
+  pcl::removeNaNFromPointCloud(*downsampled_cloud, *downsampled_cloud, indices);
+  
+  ROS_INFO("After voxel grid filtering: %lu points", downsampled_cloud->points.size());
+  
+  // Apply plane segmentation to remove the ground plane
+  ROS_INFO("Performing plane segmentation to remove floor...");
+  pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+  pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+  pcl::SACSegmentation<PointT> seg;
+  
+  // Configure the segmentation parameters
+  seg.setOptimizeCoefficients(true);
+  seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+  seg.setMethodType(pcl::SAC_RANSAC);
+  seg.setDistanceThreshold(0.01); // 1cm threshold
+  seg.setMaxIterations(100);
+  
+  // Specify that we're looking for a plane perpendicular to the Z axis (ground plane)
+  Eigen::Vector3f axis(0.0, 0.0, 1.0);
+  seg.setAxis(axis);
+  seg.setEpsAngle(15.0 * (M_PI / 180.0)); // Allow 15 degrees deviation from Z axis
+  
+  // Perform the segmentation
+  seg.setInputCloud(downsampled_cloud);
+  seg.segment(*inliers, *coefficients);
+  
+  if (inliers->indices.size() > 0) {
+    // Extract everything except the plane (ground)
+    pcl::ExtractIndices<PointT> extract;
+    extract.setInputCloud(downsampled_cloud);
+    extract.setIndices(inliers);
+    extract.setNegative(true); // Extract everything EXCEPT the ground plane
+    
+    PointCPtr cloud_without_ground(new PointC);
+    extract.filter(*cloud_without_ground);
+    
+    ROS_INFO("Ground plane removed: kept %lu of %lu points", 
+             cloud_without_ground->points.size(), downsampled_cloud->points.size());
+    
+    // Replace downsampled_cloud with the filtered version
+    downsampled_cloud = cloud_without_ground;
+  } else {
+    ROS_WARN("No ground plane detected in the point cloud");
+  }
+  
+  // Publish the filtered cloud for visualization in debug mode
+  if (debug_) {
+    sensor_msgs::PointCloud2 filtered_cloud_msg;
+    pcl::toROSMsg(*downsampled_cloud, filtered_cloud_msg);
+    filtered_cloud_msg.header.frame_id = downsampled_cloud->header.frame_id.empty() ? base_frame_ : downsampled_cloud->header.frame_id;
+    filtered_cloud_msg.header.stamp = ros::Time::now();
+    filtered_cloud_for_octomap_pub_.publish(filtered_cloud_msg);
+    ROS_INFO("Published filtered cloud for visualization");
   }
   
   ROS_INFO("====== POINT CLOUD EXTRACTION COMPLETED ======\n");
-  return cloud;
+  return downsampled_cloud;
 }
