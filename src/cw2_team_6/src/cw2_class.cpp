@@ -41,6 +41,8 @@ cw2::cw2(ros::NodeHandle nh):
   // Initialize OctoMap-related subscribers and clients
   octomap_sub_ = nh_.subscribe("/octomap_binary", 1, &cw2::octomap_callback, this);
   octomap_client_ = nh_.serviceClient<octomap_msgs::GetOctomap>("/octomap_full");
+
+  cw2_config();
   
   ROS_INFO("cw2 class initialised");
 }
@@ -116,9 +118,6 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   if (debug_) {
     ROS_INFO("Debug mode is enabled - will provide extended logging and return to home after completion");
   }
-
-  // Make sure the robot is configured
-  cw2_config();
 
   // Extract required information from request
   geometry_msgs::PointStamped object_point = request.object_point;
@@ -668,11 +667,135 @@ bool
 cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   cw2_world_spawner::Task2Service::Response &response)
 {
-  /* function which should solve task 2 */
+  /* Task 2: Implementation for shape recognition between cross and nought shapes */
 
+  ROS_INFO("\n\n====== TASK 2 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 2 has been triggered");
 
+  // Extract required information from request
+  std::vector<geometry_msgs::PointStamped> ref_object_points = request.ref_object_points;
+  geometry_msgs::PointStamped mystery_object_point = request.mystery_object_point;
+
+  ROS_INFO("====== TASK DETAILS ======");
+  ROS_INFO("Number of reference objects: %lu", ref_object_points.size());
+  ROS_INFO("Reference object 1 position: [%f, %f, %f]", 
+           ref_object_points[0].point.x, ref_object_points[0].point.y, ref_object_points[0].point.z);
+  ROS_INFO("Reference object 2 position: [%f, %f, %f]", 
+           ref_object_points[1].point.x, ref_object_points[1].point.y, ref_object_points[1].point.z);
+  ROS_INFO("Mystery object position: [%f, %f, %f]", 
+           mystery_object_point.point.x, mystery_object_point.point.y, mystery_object_point.point.z);
+  ROS_INFO("==========================\n");
+
+  // Vector to store shape types (true for cross, false for nought)
+  std::vector<bool> is_cross_shape;
+
+  // Process all objects (2 reference objects + 1 mystery object)
+  std::vector<geometry_msgs::PointStamped> all_objects = ref_object_points;
+  all_objects.push_back(mystery_object_point);
+
+  for (size_t i = 0; i < all_objects.size(); i++) {
+    std::string object_name = (i < ref_object_points.size()) ? 
+                              "Reference object " + std::to_string(i+1) : 
+                              "Mystery object";
+    
+    ROS_INFO("\n====== PROCESSING %s ======", object_name.c_str());
+    
+    // 1. Move to scanning position above the object
+    bool scan_success = moveToScanPosition(all_objects[i].point);
+    
+    // 2. Perform scanning motion around the object
+    bool motion_success = performScanningMotion(all_objects[i].point);
+    
+    // 3. Extract point cloud from OctoMap
+    PointCPtr point_cloud = extractPointCloudFromOctomap();
+    
+    // 4. Extract object from point cloud
+    PointCPtr object_cloud = extractObjectPointCloud(point_cloud, all_objects[i].point);
+    
+    // 5. Determine if object is cross or nought by checking if center has points
+    bool is_cross = determineShapeType(object_cloud, all_objects[i].point);
+    is_cross_shape.push_back(is_cross);
+    
+    ROS_INFO("%s is a %s shape", object_name.c_str(), is_cross ? "CROSS" : "NOUGHT");
+  }
+
+  // Determine which reference object matches the mystery object
+  int mystery_object_num = 0;
+  if (is_cross_shape[2] == is_cross_shape[0]) {
+    // Mystery object matches reference object 1
+    mystery_object_num = 1;
+  } else if (is_cross_shape[2] == is_cross_shape[1]) {
+    // Mystery object matches reference object 2
+    mystery_object_num = 2;
+  } else {
+    ROS_ERROR("Mystery object doesn't match either reference object. Defaulting to object 1.");
+    mystery_object_num = 1;
+  }
+
+  // Set the response
+  response.mystery_object_num = mystery_object_num;
+  
+  ROS_INFO("\n=========task2 result=========");
+  ROS_INFO("The mystery object matches reference object %d", mystery_object_num);
+  
+  // Print the shapes of all objects more clearly
+  ROS_INFO("Reference object 1 shape: %s", is_cross_shape[0] ? "CROSS" : "NOUGHT");
+  ROS_INFO("Reference object 2 shape: %s", is_cross_shape[1] ? "CROSS" : "NOUGHT");
+  ROS_INFO("Mystery object shape: %s", is_cross_shape[2] ? "CROSS" : "NOUGHT");
+  ROS_INFO("================================");
+  
+  // Move back to a neutral position
+  geometry_msgs::PoseStamped neutral_pose;
+  neutral_pose.header.frame_id = base_frame_;
+  neutral_pose.pose = scan_pose_; // Using the predefined scan pose as neutral position
+  moveArm(neutral_pose);
+
+  ROS_INFO("\n====== TASK 2 COMPLETED ======\n");
   return true;
+}
+
+// Helper function to determine if an object is a cross (true) or nought (false)
+bool cw2::determineShapeType(PointCPtr object_cloud, const geometry_msgs::Point &center_point) {
+  ROS_INFO("Determining shape type (cross or nought) based on center occupancy");
+  
+  // If cloud is empty, can't make determination
+  if (object_cloud->empty()) {
+    ROS_WARN("Object cloud is empty, defaulting to cross shape");
+    return true;
+  }
+  
+  // Radius to check around center point (10mm as specified)
+  const float center_check_radius = 0.05; // 10mm
+  
+  // Create KdTree for nearest neighbor search
+  pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
+  tree->setInputCloud(object_cloud);
+  
+  // Create point for center
+  PointT center_search_point;
+  center_search_point.x = center_point.x;
+  center_search_point.y = center_point.y;
+  center_search_point.z = center_point.z;
+  
+  // Find points within radius
+  std::vector<int> point_indices;
+  std::vector<float> point_distances;
+  int found = tree->radiusSearch(center_search_point, center_check_radius, point_indices, point_distances);
+  
+  ROS_INFO("Found %d points within %f m of center", found, center_check_radius);
+  
+  // If points are found in the center, it's a cross shape
+  // If no points are found in the center, it's a nought (O) shape
+  bool is_cross = (found > 0);
+  
+  ROS_INFO("Shape determination: %s", is_cross ? "CROSS (center is occupied)" : "NOUGHT (center is empty)");
+  
+  // Publish points for visualization in debug mode
+  if (debug_) {
+    publishPointCloud(object_cloud, cloud_object_pub_);
+  }
+  
+  return is_cross;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

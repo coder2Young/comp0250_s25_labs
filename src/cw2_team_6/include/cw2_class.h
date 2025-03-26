@@ -239,6 +239,11 @@ public:
       const std::string &shape_type,
       const Eigen::Vector3f &grasp_direction,
       float grasp_angle);
+      
+  // Task 2 methods
+  bool determineShapeType(
+      PointCPtr object_cloud,
+      const geometry_msgs::Point &center_point);
 
   // Constructor and destructor
   ~cw2();
