@@ -138,6 +138,9 @@ public:
   void
   pickAndPlace(geometry_msgs::PoseStamped pick_pose, geometry_msgs::PointStamped place_point);
 
+  // Color filtering function for point clouds
+  PointCPtr filterPointCloudByColor(const PointCPtr& input_cloud);
+
   /* ----- class member variables ----- */
 
   ros::NodeHandle nh_;
@@ -264,6 +267,21 @@ public:
 
   // Publisher for center point visualization
   ros::Publisher center_point_marker_pub_;
+
+  // New Task 1 parameters
+  bool t1_downsample_;       // Whether to apply downsampling in Task 1
+  bool t1_move_constraint_;  // Whether to apply path constraints for grasping
+  float t1_scan_height_;     // Height above object for scanning
+
+  // Grasp visualization
+  void visualizeGraspPoint(const geometry_msgs::Point &grasp_point, const tf2::Quaternion &orientation);
+  ros::Publisher grasp_marker_pub_;
+
+  // Grasping parameters
+  float pick_lift_offset_;  // Height to lift objects after picking
+
+  // Current grasp orientation for place operation
+  geometry_msgs::Quaternion current_grasp_orientation_;
 
 private:
   // Euclidean clustering parameters
