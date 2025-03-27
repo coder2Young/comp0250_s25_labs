@@ -49,6 +49,8 @@ solution is contained within the cw2_team_<your_team_number> package */
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/segmentation/extract_clusters.h>
 #include <pcl/common/pca.h>
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/statistical_outlier_removal.h>
 // standard c++ library includes (std::string, std::vector)
 #include <string>
 #include <vector>
@@ -255,11 +257,24 @@ public:
   float scan_radius_;
   float scan_height_offset_;
 
+  // Point cloud processing for Task 2
+  PointCPtr getLatestPointCloud(const std::string& topic, const std::string& target_frame);
+  PointCPtr processPointCloud(const PointCPtr& input_cloud);
+  bool determineShapeTypeFromCamera(PointCPtr object_cloud, const geometry_msgs::Point &center_point);
+
+  // Publisher for center point visualization
+  ros::Publisher center_point_marker_pub_;
+
 private:
   // Euclidean clustering parameters
   float cluster_tolerance_;   // Distance threshold for clustering
   int min_cluster_size_;      // Minimum number of points in a cluster
   int max_cluster_size_;      // Maximum number of points in a cluster
+  
+  // Shape determination radius for Task 2
+  float t2_shape_determine_radius_;  // Radius to check for center points in Task 2
+  float t2_shape_determine_z_offset_; // Z offset for center point in Task 2
+  int t2_shape_determine_min_points_; // Minimum number of points to be confident in Task 2
 };
 
 #endif // end of include guard for cw2_CLASS_H_

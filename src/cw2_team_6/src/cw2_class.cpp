@@ -37,6 +37,8 @@ cw2::cw2(ros::NodeHandle nh):
   pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/pca_axes", 1, true);
   // Use for debug visualization, not for OctoMap input
   filtered_cloud_for_octomap_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/filtered_cloud", 1, true);
+  // Add center point marker publisher
+  center_point_marker_pub_ = nh_.advertise<visualization_msgs::Marker>("/debug/center_point", 1, true);
   
   // Initialize OctoMap-related subscribers and clients
   octomap_sub_ = nh_.subscribe("/octomap_binary", 1, &cw2::octomap_callback, this);
@@ -100,6 +102,11 @@ cw2::cw2_config()
   num_scan_poses_ = 4;          // Number of scan poses around the object
   scan_radius_ = 0.1;          // Distance from object center (25 cm)
   scan_height_offset_ = 0.5;    // Height above the object (50 cm)
+
+  // Added for Task 2 shape determination
+  t2_shape_determine_radius_ = 0.01; // 40mm radius for center check
+  t2_shape_determine_z_offset_ = 0.02; // 20cm offset for center point
+  t2_shape_determine_min_points_ = 20; // Minimum number of points to be confident in Task 2
 
   return;
 }
@@ -685,7 +692,7 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   ROS_INFO("Mystery object position: [%f, %f, %f]", 
            mystery_object_point.point.x, mystery_object_point.point.y, mystery_object_point.point.z);
   ROS_INFO("==========================\n");
-
+  
   // Vector to store shape types (true for cross, false for nought)
   std::vector<bool> is_cross_shape;
 
@@ -701,19 +708,46 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
     ROS_INFO("\n====== PROCESSING %s ======", object_name.c_str());
     
     // 1. Move to scanning position above the object
-    bool scan_success = moveToScanPosition(all_objects[i].point);
+    geometry_msgs::PoseStamped scan_pose;
+    scan_pose.header.frame_id = base_frame_;
+    scan_pose.pose.position.x = all_objects[i].point.x;
+    scan_pose.pose.position.y = all_objects[i].point.y;
+    scan_pose.pose.position.z = all_objects[i].point.z + 0.5; // 50cm above object
+    scan_pose.pose.orientation = grasp_orientation_;
     
-    // 2. Perform scanning motion around the object
-    bool motion_success = performScanningMotion(all_objects[i].point);
+    ROS_INFO("Moving to scan position above %s", object_name.c_str());
+    bool scan_success = moveArm(scan_pose);
     
-    // 3. Extract point cloud from OctoMap
-    PointCPtr point_cloud = extractPointCloudFromOctomap();
+    if (!scan_success) {
+      ROS_ERROR("Failed to move to scan position for %s", object_name.c_str());
+      continue;
+    }
     
-    // 4. Extract object from point cloud
-    PointCPtr object_cloud = extractObjectPointCloud(point_cloud, all_objects[i].point);
+    // 2. Wait for camera to stabilize and collect point cloud
+    ROS_INFO("Waiting for point cloud data...");
+    ros::Duration(1.0).sleep(); // Wait for arm to stabilize
     
-    // 5. Determine if object is cross or nought by checking if center has points
-    bool is_cross = determineShapeType(object_cloud, all_objects[i].point);
+    // Get fresh point cloud from camera using waitForMessage (implemented in getLatestPointCloud)
+    PointCPtr camera_cloud = getLatestPointCloud("/r200/camera/depth_registered/points", base_frame_);
+    
+    if (camera_cloud->empty()) {
+      ROS_ERROR("Failed to get point cloud for %s", object_name.c_str());
+      continue;
+    }
+    
+    ROS_INFO("Received point cloud with %lu points", camera_cloud->points.size());
+    
+    // 3. Process point cloud (downsample, color filter)
+    PointCPtr filtered_cloud = processPointCloud(camera_cloud);
+    
+    // Publish filtered cloud for visualization
+    if (debug_) {
+      publishPointCloud(filtered_cloud, cloud_filtered_pub_);
+      publishPointCloud(filtered_cloud, cloud_object_pub_);
+    }
+    
+    // 4. Determine shape from filtered cloud
+    bool is_cross = determineShapeTypeFromCamera(filtered_cloud, all_objects[i].point);
     is_cross_shape.push_back(is_cross);
     
     ROS_INFO("%s is a %s shape", object_name.c_str(), is_cross ? "CROSS" : "NOUGHT");
@@ -721,14 +755,19 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
 
   // Determine which reference object matches the mystery object
   int mystery_object_num = 0;
-  if (is_cross_shape[2] == is_cross_shape[0]) {
-    // Mystery object matches reference object 1
-    mystery_object_num = 1;
-  } else if (is_cross_shape[2] == is_cross_shape[1]) {
-    // Mystery object matches reference object 2
-    mystery_object_num = 2;
+  if (is_cross_shape.size() == 3) {  // Ensure we have all three shapes
+    if (is_cross_shape[2] == is_cross_shape[0]) {
+      // Mystery object matches reference object 1
+      mystery_object_num = 1;
+    } else if (is_cross_shape[2] == is_cross_shape[1]) {
+      // Mystery object matches reference object 2
+      mystery_object_num = 2;
+    } else {
+      ROS_ERROR("Mystery object doesn't match either reference object. Defaulting to object 1.");
+      mystery_object_num = 1;
+    }
   } else {
-    ROS_ERROR("Mystery object doesn't match either reference object. Defaulting to object 1.");
+    ROS_ERROR("Failed to determine all object shapes. Defaulting to object 1.");
     mystery_object_num = 1;
   }
 
@@ -739,9 +778,11 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   ROS_INFO("The mystery object matches reference object %d", mystery_object_num);
   
   // Print the shapes of all objects more clearly
-  ROS_INFO("Reference object 1 shape: %s", is_cross_shape[0] ? "CROSS" : "NOUGHT");
-  ROS_INFO("Reference object 2 shape: %s", is_cross_shape[1] ? "CROSS" : "NOUGHT");
-  ROS_INFO("Mystery object shape: %s", is_cross_shape[2] ? "CROSS" : "NOUGHT");
+  if (is_cross_shape.size() >= 3) {
+    ROS_INFO("Reference object 1 shape: %s", is_cross_shape[0] ? "CROSS" : "NOUGHT");
+    ROS_INFO("Reference object 2 shape: %s", is_cross_shape[1] ? "CROSS" : "NOUGHT");
+    ROS_INFO("Mystery object shape: %s", is_cross_shape[2] ? "CROSS" : "NOUGHT");
+  }
   ROS_INFO("================================");
   
   // Move back to a neutral position
@@ -754,46 +795,104 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   return true;
 }
 
-// Helper function to determine if an object is a cross (true) or nought (false)
-bool cw2::determineShapeType(PointCPtr object_cloud, const geometry_msgs::Point &center_point) {
-  ROS_INFO("Determining shape type (cross or nought) based on center occupancy");
+// Modified shape determination to use point cloud centroid instead of message-provided center point
+bool cw2::determineShapeTypeFromCamera(PointCPtr cloud, const geometry_msgs::Point &center_point) {
+  ROS_INFO("\n====== DETERMINING SHAPE TYPE FROM CAMERA ======");
   
   // If cloud is empty, can't make determination
-  if (object_cloud->empty()) {
-    ROS_WARN("Object cloud is empty, defaulting to cross shape");
+  if (cloud->empty()) {
+    ROS_WARN("Point cloud is empty, defaulting to cross shape");
     return true;
   }
   
-  // Radius to check around center point (10mm as specified)
-  const float center_check_radius = 0.05; // 10mm
+  // Skip spatial filtering and use the filtered cloud directly
+  ROS_INFO("Using filtered cloud with %lu points for shape determination", cloud->points.size());
+  
+  // Compute centroid of the point cloud
+  Eigen::Vector4f centroid;
+  pcl::compute3DCentroid(*cloud, centroid);
+  
+  ROS_INFO("Point cloud centroid: [%f, %f, %f]", centroid[0], centroid[1], centroid[2]);
+  ROS_INFO("Message-provided center: [%f, %f, %f]", center_point.x, center_point.y, center_point.z);
   
   // Create KdTree for nearest neighbor search
   pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
-  tree->setInputCloud(object_cloud);
+  tree->setInputCloud(cloud);
   
-  // Create point for center
+  // Create point for center using the centroid
   PointT center_search_point;
-  center_search_point.x = center_point.x;
-  center_search_point.y = center_point.y;
-  center_search_point.z = center_point.z;
+  center_search_point.x = centroid[0];
+  center_search_point.y = centroid[1];
+  center_search_point.z = centroid[2];
   
-  // Find points within radius
+  // Visualize both centers as markers - green for message center, blue for centroid
+  if (debug_) {
+    // First, visualize the message-provided center in green
+    visualization_msgs::Marker msg_marker;
+    msg_marker.header.frame_id = base_frame_;
+    msg_marker.header.stamp = ros::Time::now();
+    msg_marker.ns = "center_points";
+    msg_marker.id = 0;
+    msg_marker.type = visualization_msgs::Marker::SPHERE;
+    msg_marker.action = visualization_msgs::Marker::ADD;
+    
+    msg_marker.pose.position = center_point;
+    msg_marker.pose.orientation.w = 1.0;
+    
+    msg_marker.scale.x = t2_shape_determine_radius_ * 2.0;
+    msg_marker.scale.y = t2_shape_determine_radius_ * 2.0;
+    msg_marker.scale.z = t2_shape_determine_radius_ * 2.0;
+    
+    msg_marker.color.r = 0.0;
+    msg_marker.color.g = 1.0;
+    msg_marker.color.b = 0.0;
+    msg_marker.color.a = 0.5;
+    
+    msg_marker.lifetime = ros::Duration(0);
+    center_point_marker_pub_.publish(msg_marker);
+    
+    // Second, visualize the computed centroid in blue
+    visualization_msgs::Marker centroid_marker;
+    centroid_marker.header.frame_id = base_frame_;
+    centroid_marker.header.stamp = ros::Time::now();
+    centroid_marker.ns = "center_points";
+    centroid_marker.id = 1;  // Different ID from the message marker
+    centroid_marker.type = visualization_msgs::Marker::SPHERE;
+    centroid_marker.action = visualization_msgs::Marker::ADD;
+    
+    centroid_marker.pose.position.x = centroid[0];
+    centroid_marker.pose.position.y = centroid[1];
+    centroid_marker.pose.position.z = centroid[2];
+    centroid_marker.pose.orientation.w = 1.0;
+    
+    centroid_marker.scale.x = t2_shape_determine_radius_ * 2.0;
+    centroid_marker.scale.y = t2_shape_determine_radius_ * 2.0;
+    centroid_marker.scale.z = t2_shape_determine_radius_ * 2.0;
+    
+    centroid_marker.color.r = 0.0;
+    centroid_marker.color.g = 0.0;
+    centroid_marker.color.b = 1.0;
+    centroid_marker.color.a = 0.5;
+    
+    centroid_marker.lifetime = ros::Duration(0);
+    center_point_marker_pub_.publish(centroid_marker);
+    
+    ROS_INFO("Published center markers - Green: message center, Blue: point cloud centroid");
+  }
+  
+  // Find points within radius of the centroid
   std::vector<int> point_indices;
   std::vector<float> point_distances;
-  int found = tree->radiusSearch(center_search_point, center_check_radius, point_indices, point_distances);
+  int found = tree->radiusSearch(center_search_point, t2_shape_determine_radius_, point_indices, point_distances);
   
-  ROS_INFO("Found %d points within %f m of center", found, center_check_radius);
+  ROS_INFO("Found %d points within %f m of centroid", found, t2_shape_determine_radius_);
   
   // If points are found in the center, it's a cross shape
   // If no points are found in the center, it's a nought (O) shape
-  bool is_cross = (found > 0);
+  bool is_cross = (found > t2_shape_determine_min_points_);
   
-  ROS_INFO("Shape determination: %s", is_cross ? "CROSS (center is occupied)" : "NOUGHT (center is empty)");
-  
-  // Publish points for visualization in debug mode
-  if (debug_) {
-    publishPointCloud(object_cloud, cloud_object_pub_);
-  }
+  ROS_INFO("Shape determination from camera: %s", 
+           is_cross ? "CROSS (center is occupied)" : "NOUGHT (center is empty)");
   
   return is_cross;
 }
@@ -1334,4 +1433,153 @@ PointCPtr cw2::extractPointCloudFromOctomap() {
   
   ROS_INFO("====== POINT CLOUD EXTRACTION COMPLETED ======\n");
   return downsampled_cloud;
+}
+
+// Helper function to get latest point cloud from a topic
+PointCPtr cw2::getLatestPointCloud(const std::string& topic, const std::string& target_frame) {
+  ROS_INFO("Waiting for point cloud message from %s...", topic.c_str());
+  PointCPtr cloud(new PointC);
+  
+  // Get the latest message from the point cloud topic
+  sensor_msgs::PointCloud2::ConstPtr cloud_msg = 
+      ros::topic::waitForMessage<sensor_msgs::PointCloud2>(topic, nh_, ros::Duration(5.0));
+  
+  if (!cloud_msg) {
+    ROS_ERROR("Failed to receive point cloud message from %s within timeout", topic.c_str());
+    return cloud;
+  }
+  
+  // Convert ROS message to PCL point cloud
+  pcl::fromROSMsg(*cloud_msg, *cloud);
+  
+  ROS_INFO("Received point cloud with %lu points in frame %s", 
+           cloud->points.size(), cloud_msg->header.frame_id.c_str());
+  
+  // Transform point cloud to target frame if necessary
+  if (cloud_msg->header.frame_id != target_frame) {
+    ROS_INFO("Transforming point cloud from %s to %s", 
+             cloud_msg->header.frame_id.c_str(), target_frame.c_str());
+    
+    try {
+      // Look up transform
+      geometry_msgs::TransformStamped transform = 
+          tf_buffer_.lookupTransform(target_frame, cloud_msg->header.frame_id, ros::Time(0), ros::Duration(3.0));
+      
+      // Create transformed cloud
+      PointCPtr transformed_cloud(new PointC);
+      
+      // Apply transform to point cloud
+      Eigen::Matrix4f transform_matrix;
+      Eigen::Quaternionf q(transform.transform.rotation.w,
+                          transform.transform.rotation.x,
+                          transform.transform.rotation.y,
+                          transform.transform.rotation.z);
+      
+      transform_matrix.block<3,3>(0,0) = q.toRotationMatrix();
+      transform_matrix(0,3) = transform.transform.translation.x;
+      transform_matrix(1,3) = transform.transform.translation.y;
+      transform_matrix(2,3) = transform.transform.translation.z;
+      transform_matrix(3,0) = 0.0;
+      transform_matrix(3,1) = 0.0;
+      transform_matrix(3,2) = 0.0;
+      transform_matrix(3,3) = 1.0;
+      
+      pcl::transformPointCloud(*cloud, *transformed_cloud, transform_matrix);
+      
+      // Update frame_id and return transformed cloud
+      transformed_cloud->header.frame_id = target_frame;
+      ROS_INFO("Transformed point cloud to %s with %lu points", 
+               target_frame.c_str(), transformed_cloud->points.size());
+      return transformed_cloud;
+    }
+    catch (tf2::TransformException &ex) {
+      ROS_ERROR("Transform error: %s", ex.what());
+      ROS_WARN("Using untransformed point cloud");
+    }
+  }
+  
+  // Return original cloud if no transform needed or if transform failed
+  cloud->header.frame_id = target_frame;
+  return cloud;
+}
+
+// Process point cloud for object detection
+PointCPtr cw2::processPointCloud(const PointCPtr& input_cloud) {
+  ROS_INFO("\n====== PROCESSING POINT CLOUD ======");
+  ROS_INFO("Input cloud has %lu points", input_cloud->points.size());
+  
+  if (input_cloud->empty()) {
+    ROS_ERROR("Input cloud is empty");
+    return PointCPtr(new PointC);
+  }
+  
+  // 1. Downsample with voxel grid filter (1mm voxel size)
+  ROS_INFO("Downsampling point cloud with voxel grid filter...");
+  pcl::VoxelGrid<PointT> voxel_filter;
+  PointCPtr cloud_downsampled(new PointC);
+  
+  voxel_filter.setInputCloud(input_cloud);
+  voxel_filter.setLeafSize(0.002f, 0.002f, 0.002f);  // 1mm voxel size
+  voxel_filter.filter(*cloud_downsampled);
+  
+  ROS_INFO("Downsampled cloud has %lu points", cloud_downsampled->points.size());
+  
+  // 2. Filter by color (remove green floor, keep only specific colors)
+  ROS_INFO("Filtering by color...");
+  PointCPtr cloud_color_filtered(new PointC);
+  
+  for (const auto& point : cloud_downsampled->points) {
+    // Normalize RGB values to 0-1 range
+    float r = point.r / 255.0f;
+    float g = point.g / 255.0f;
+    float b = point.b / 255.0f;
+    
+    // Check if color matches one of our target colors
+    bool isPurple = (r > 0.7f && r < 0.9f) &&
+                  (g > 0.0f && g < 0.2f) &&
+                  (b > 0.7f && b < 0.9f);
+    
+    bool isRed = (r > 0.7f && r < 0.9f) &&
+               (g > 0.0f && g < 0.2f) &&
+               (b > 0.0f && b < 0.2f);
+    
+    bool isBlue = (r > 0.0f && r < 0.2f) &&
+                (g > 0.0f && g < 0.2f) &&
+                (b > 0.7f && b < 0.9f);
+    
+    bool isBrown = (r > 0.4f && r < 0.6f) &&
+                 (g > 0.1f && g < 0.3f) &&
+                 (b > 0.1f && b < 0.3f);
+    
+    bool isBlack = (r > 0.0f && r < 0.2f) &&
+                 (g > 0.0f && g < 0.2f) &&
+                 (b > 0.0f && b < 0.2f);
+    
+    // Keep only target colors
+    if (isPurple || isRed || isBlue || isBrown || isBlack) {
+      cloud_color_filtered->points.push_back(point);
+    }
+  }
+  
+  cloud_color_filtered->width = cloud_color_filtered->points.size();
+  cloud_color_filtered->height = 1;
+  cloud_color_filtered->is_dense = true;
+  cloud_color_filtered->header = cloud_downsampled->header;
+  
+  ROS_INFO("Color-filtered cloud has %lu points", cloud_color_filtered->points.size());
+  
+  // 3. Remove statistical outliers
+  ROS_INFO("Removing outliers...");
+  pcl::StatisticalOutlierRemoval<PointT> sor;
+  PointCPtr cloud_filtered(new PointC);
+  
+  sor.setInputCloud(cloud_color_filtered);
+  sor.setMeanK(50);              // 50 neighbors to analyze
+  sor.setStddevMulThresh(1.0);   // Standard deviation threshold
+  sor.filter(*cloud_filtered);
+  
+  ROS_INFO("After outlier removal: %lu points", cloud_filtered->points.size());
+  
+  ROS_INFO("====== POINT CLOUD PROCESSING COMPLETED ======\n");
+  return cloud_filtered;
 }
