@@ -141,6 +141,9 @@ public:
   // Color filtering function for point clouds
   PointCPtr filterPointCloudByColor(const PointCPtr& input_cloud);
 
+  // Add floor collision object to planning scene
+  void addFloorCollisionObject();
+
   /* ----- class member variables ----- */
 
   ros::NodeHandle nh_;
@@ -282,6 +285,9 @@ public:
 
   // Current grasp orientation for place operation
   geometry_msgs::Quaternion current_grasp_orientation_;
+
+  // Current lift height for horizontal movement to place
+  double current_lift_height_;
 
 private:
   // Euclidean clustering parameters

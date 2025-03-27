@@ -49,6 +49,9 @@ cw2::cw2(ros::NodeHandle nh):
   cw2_config();
   
   ROS_INFO("cw2 class initialised");
+
+  // Add this function to create and add a floor collision object
+  addFloorCollisionObject();
 }
 
 cw2::~cw2() {
@@ -115,6 +118,9 @@ cw2::cw2_config()
   t1_downsample_ = false;  // Turn off downsampling initially for better PCA
   t1_move_constraint_ = false;  // Enable movement constraints for better grasping
   t1_scan_height_ = 0.5;  // Height above object for scanning (50cm)
+
+  // Add floor collision object to prevent collisions with the ground
+  addFloorCollisionObject();
 
   return;
 }
@@ -401,10 +407,10 @@ bool cw2::planAndExecuteGrasp(
     return false;
   }
   
-  // Calculate grasp position
+  // 0. Calculate grasp position with proper offsets
   geometry_msgs::PoseStamped grasp_standby_pose;
   geometry_msgs::PoseStamped grasp_pose;
-  geometry_msgs::PoseStamped lift_pose; // Higher lifting pose
+  geometry_msgs::PoseStamped lift_pose;
   grasp_standby_pose.header.frame_id = base_frame_;
   grasp_pose.header.frame_id = base_frame_;
   lift_pose.header.frame_id = base_frame_;
@@ -420,7 +426,9 @@ bool cw2::planAndExecuteGrasp(
   tf2::Quaternion q_rot;
   tf2::Quaternion q_final;
   
-  // Determine the appropriate grasp strategy based on shape
+  // Calculate offset grasp position based on shape type
+  float grasp_x, grasp_y;
+  
   if (shape_type == "cross") {
     ROS_INFO("Calculating grasp for cross shape...");
     
@@ -428,32 +436,20 @@ bool cw2::planAndExecuteGrasp(
     float offset = 0.06; // 60mm offset along principal axis
     
     // Calculate grasp point by offsetting along principal axis
-    grasp_pose.pose.position.x = object_point.x + principal_axis[0] * offset;
-    grasp_pose.pose.position.y = object_point.y + principal_axis[1] * offset;
-    grasp_pose.pose.position.z = object_point.z + hand_offset_; // Offset upward to prevent collision
-    
-    // Set standby position above grasp point
-    grasp_standby_pose.pose.position.x = grasp_pose.pose.position.x;
-    grasp_standby_pose.pose.position.y = grasp_pose.pose.position.y;
-    grasp_standby_pose.pose.position.z = grasp_pose.pose.position.z + grasp_stanby_height_;
-    
-    // Set lift position (same X,Y but higher Z)
-    lift_pose.pose.position.x = grasp_pose.pose.position.x;
-    lift_pose.pose.position.y = grasp_pose.pose.position.y;
-    lift_pose.pose.position.z = object_point.z + pick_lift_offset_; // Higher lifting position
-    
-    ROS_INFO("Cross grasp point: [%f, %f, %f] (offset by 60mm along principal axis)",
-             grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
+    grasp_x = object_point.x + principal_axis[0] * offset;
+    grasp_y = object_point.y + principal_axis[1] * offset;
     
     // Rotate around Z axis to align gripper with the cross arm
     q_rot.setRPY(0, 0, orientation_data.grasp_angle);
     q_final = q_rot * q_orig;
     
+    ROS_INFO("Cross grasp point: [%f, %f] (offset by 60mm along principal axis)",
+             grasp_x, grasp_y);
+    
   } else { // "nought"
     ROS_INFO("Calculating grasp for nought shape...");
     
     // For nought, find the midpoint angle between primary and secondary axes
-    // First, get the angles of both axes in XY plane
     float primary_angle = atan2(principal_axis[1], principal_axis[0]);
     float secondary_angle = atan2(secondary_axis[1], secondary_axis[0]);
     
@@ -472,94 +468,117 @@ bool cw2::planAndExecuteGrasp(
     grasp_direction_xy[1] = sin(midpoint_angle);
     grasp_direction_xy[2] = 0.0;
     
-    // Use 100mm offset along this direction
-    float offset = 0.08; // 80mm offset - increased from previous 0.06
+    // Use 80mm offset along this direction
+    float offset = 0.08; // 80mm offset
     
     // Calculate grasp point by offsetting along the midpoint direction
-    grasp_pose.pose.position.x = object_point.x + grasp_direction_xy[0] * offset;
-    grasp_pose.pose.position.y = object_point.y + grasp_direction_xy[1] * offset;
-    grasp_pose.pose.position.z = object_point.z + hand_offset_; // Offset upward to prevent collision
-    
-    // Set standby position above grasp point
-    grasp_standby_pose.pose.position.x = grasp_pose.pose.position.x;
-    grasp_standby_pose.pose.position.y = grasp_pose.pose.position.y;
-    grasp_standby_pose.pose.position.z = grasp_pose.pose.position.z + grasp_stanby_height_;
-    
-    // Set lift position (same X,Y but higher Z)
-    lift_pose.pose.position.x = grasp_pose.pose.position.x;
-    lift_pose.pose.position.y = grasp_pose.pose.position.y;
-    lift_pose.pose.position.z = object_point.z + pick_lift_offset_; // Higher lifting position
-    
-    ROS_INFO("Nought grasp point: [%f, %f, %f] (offset by 100mm along midpoint axis)",
-             grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
+    grasp_x = object_point.x + grasp_direction_xy[0] * offset;
+    grasp_y = object_point.y + grasp_direction_xy[1] * offset;
     
     // Add 90 degrees rotation around Z axis to the midpoint angle
     float grasp_angle = midpoint_angle + M_PI/2.0; // Add 90 degrees
     q_rot.setRPY(0, 0, grasp_angle);
     q_final = q_rot * q_orig;
+    
+    ROS_INFO("Nought grasp point: [%f, %f] (offset by 80mm along midpoint axis)",
+             grasp_x, grasp_y);
   }
   
-  // Normalize and apply quaternion to all poses
+  // Normalize quaternion
   q_final.normalize();
-  tf2::convert(q_final, grasp_pose.pose.orientation);
-  tf2::convert(q_final, grasp_standby_pose.pose.orientation);
-  tf2::convert(q_final, lift_pose.pose.orientation);
+  
+  // Step 0: Apply hand_offset_ to grasp position and set all positions
+  // Grasp position (with hand_offset_)
+  grasp_pose.pose.position.x = grasp_x;
+  grasp_pose.pose.position.y = grasp_y;
+  grasp_pose.pose.position.z = object_point.z + hand_offset_;
+  grasp_pose.pose.orientation = tf2::toMsg(q_final);
+  
+  // Standby position (10cm above grasp position)
+  grasp_standby_pose.pose.position.x = grasp_x;
+  grasp_standby_pose.pose.position.y = grasp_y;
+  grasp_standby_pose.pose.position.z = grasp_pose.pose.position.z + grasp_stanby_height_;
+  grasp_standby_pose.pose.orientation = grasp_pose.pose.orientation;
+  
+  // Lift position (pick_lift_offset_ above ground)
+  lift_pose.pose.position.x = grasp_x;
+  lift_pose.pose.position.y = grasp_y;
+  lift_pose.pose.position.z = object_point.z + pick_lift_offset_;
+  lift_pose.pose.orientation = grasp_pose.pose.orientation;
+  
+  // Store the final grasp orientation for place operation
+  current_grasp_orientation_ = grasp_pose.pose.orientation;
+  // Store the lift height for horizontal movement to place
+  current_lift_height_ = lift_pose.pose.position.z;
   
   // Visualize grasp point and orientation if in debug mode
   if (debug_) {
     visualizeGraspPoint(grasp_pose.pose.position, q_final);
   }
   
-  // Move to standby position first
+  // Step 1: Move to grasp standby position
   ROS_INFO("Moving to grasp standby position...");
-  bool standby_success = false;
-  
-  if (t1_move_constraint_) {
-    // Add path constraint for vertical approach
-    moveit_msgs::Constraints constraints;
-    moveit_msgs::OrientationConstraint ocm;
-    ocm.header.frame_id = base_frame_;
-    ocm.link_name = arm_group_.getEndEffectorLink();
-    ocm.orientation = grasp_standby_pose.pose.orientation;
-    ocm.absolute_x_axis_tolerance = 0.1; // Relatively strict
-    ocm.absolute_y_axis_tolerance = 0.1;
-    ocm.absolute_z_axis_tolerance = 2.0 * M_PI; // Allow rotation around Z
-    ocm.weight = 1.0;
-    
-    constraints.orientation_constraints.push_back(ocm);
-    arm_group_.setPathConstraints(constraints);
-    
-    // Try with constraints
-    standby_success = moveArm(grasp_standby_pose);
-    
-    // If failed, retry without constraints
-    if (!standby_success) {
-      ROS_WARN("Failed to move to standby position with constraints, retrying without constraints");
-      arm_group_.clearPathConstraints();
-      standby_success = moveArm(grasp_standby_pose);
-    }
-    
-    // Clear constraints for future movements
-    arm_group_.clearPathConstraints();
-  } else {
-    // Move without constraints
-    standby_success = moveArm(grasp_standby_pose);
-  }
-  
+  bool standby_success = moveArm(grasp_standby_pose);
   if (!standby_success) {
     ROS_ERROR("Failed to move to grasp standby position");
     return false;
   }
   
-  // Move down to grasp position
+  // Step 2: Vertically move down to grasp position with constraints
   ROS_INFO("Moving down to grasp position...");
+  
+  // Add path constraint for vertical approach
+  moveit_msgs::Constraints constraints;
+  moveit_msgs::OrientationConstraint ocm;
+  ocm.header.frame_id = base_frame_;
+  ocm.link_name = arm_group_.getEndEffectorLink();
+  ocm.orientation = grasp_standby_pose.pose.orientation;
+  ocm.absolute_x_axis_tolerance = 0.01; // Very strict
+  ocm.absolute_y_axis_tolerance = 0.01; // Very strict
+  ocm.absolute_z_axis_tolerance = 0.01; // Very strict
+  ocm.weight = 1.0;
+  
+  // Add position constraint to only allow Z-axis movement
+  moveit_msgs::PositionConstraint pcm;
+  pcm.header.frame_id = base_frame_;
+  pcm.link_name = arm_group_.getEndEffectorLink();
+  
+  // Create a box constraint that only allows movement in Z direction
+  shape_msgs::SolidPrimitive box;
+  box.type = shape_msgs::SolidPrimitive::BOX;
+  box.dimensions.resize(3);
+  box.dimensions[0] = 0.002; // Small tolerance in X
+  box.dimensions[1] = 0.002; // Small tolerance in Y
+  box.dimensions[2] = 1.0;   // Allow movement in Z
+  
+  // Set the box position to allow vertical movement
+  geometry_msgs::Pose box_pose;
+  box_pose.position.x = grasp_standby_pose.pose.position.x;
+  box_pose.position.y = grasp_standby_pose.pose.position.y;
+  box_pose.position.z = (grasp_standby_pose.pose.position.z + grasp_pose.pose.position.z) / 2.0;
+  box_pose.orientation.w = 1.0;
+  
+  pcm.constraint_region.primitives.push_back(box);
+  pcm.constraint_region.primitive_poses.push_back(box_pose);
+  pcm.weight = 1.0;
+  
+  constraints.orientation_constraints.push_back(ocm);
+  constraints.position_constraints.push_back(pcm);
+  
+  arm_group_.setPathConstraints(constraints);
+  
+  // Try with constraints
   bool grasp_approach_success = moveArm(grasp_pose);
+  
+  // Clear constraints for future movements
+  arm_group_.clearPathConstraints();
+  
   if (!grasp_approach_success) {
     ROS_ERROR("Failed to move to grasp position");
     return false;
   }
   
-  // Close gripper to grasp object
+  // Step 3: Close gripper to grasp object
   ROS_INFO("Closing gripper to grasp object...");
   bool close_success = moveGripper(gripper_closed_, 2.0);
   if (!close_success) {
@@ -567,16 +586,13 @@ bool cw2::planAndExecuteGrasp(
     return false;
   }
   
-  // Move to higher lifting position for safer travel
+  // Step 4: Lift object to higher position
   ROS_INFO("Lifting object to travel height...");
   bool lift_success = moveArm(lift_pose);
   if (!lift_success) {
     ROS_ERROR("Failed to move to lifting position");
     return false;
   }
-  
-  // Store the final grasp orientation for later use in place operation
-  current_grasp_orientation_ = lift_pose.pose.orientation;
   
   ROS_INFO("====== GRASP EXECUTION COMPLETED ======\n");
   return true;
@@ -585,38 +601,93 @@ bool cw2::planAndExecuteGrasp(
 bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
   ROS_INFO("\n====== PLANNING AND EXECUTING PLACE ======");
   
-  // Calculate place position
+  // Step 0: Calculate place positions
   geometry_msgs::PoseStamped place_standby_pose;
-  geometry_msgs::PoseStamped place_pose;
+  geometry_msgs::PoseStamped horizontal_move_pose;
+  
   place_standby_pose.header.frame_id = base_frame_;
-  place_pose.header.frame_id = base_frame_;
+  horizontal_move_pose.header.frame_id = base_frame_;
   
-  // Set place position
-  place_pose.pose.position = place_point;
-  place_standby_pose.pose.position = place_point;
-  place_standby_pose.pose.position.z += place_stanby_height_;  // Standby position is above place point
-  
-  // Use the same orientation from the grasp operation
-  place_pose.pose.orientation = current_grasp_orientation_;
+  // Place standby position (hand_offset_ + place_stanby_height_ above place position)
+  // This is where we'll release the object
+  place_standby_pose.pose.position.x = place_point.x;
+  place_standby_pose.pose.position.y = place_point.y;
+  place_standby_pose.pose.position.z = place_point.z + hand_offset_ + place_stanby_height_;
   place_standby_pose.pose.orientation = current_grasp_orientation_;
   
-  // Move to place standby position
-  ROS_INFO("Moving to place standby position...");
-  bool standby_success = moveArm(place_standby_pose);
-  if (!standby_success) {
-    ROS_ERROR("Failed to move to place standby position");
+  // Horizontal move position (same Z as current lift height)
+  horizontal_move_pose.pose.position.x = place_point.x;
+  horizontal_move_pose.pose.position.y = place_point.y;
+  horizontal_move_pose.pose.position.z = current_lift_height_;
+  horizontal_move_pose.pose.orientation = current_grasp_orientation_;
+  
+  // Step 1: Horizontal move to above place position (keeping Z at lift height)
+  ROS_INFO("Moving horizontally to position above place point...");
+  bool horizontal_move_success = moveArm(horizontal_move_pose);
+  if (!horizontal_move_success) {
+    ROS_ERROR("Failed to move horizontally to place area");
     return false;
   }
   
-  // Move down to place position
-  ROS_INFO("Moving down to place position...");
-  bool place_approach_success = moveArm(place_pose);
-  if (!place_approach_success) {
-    ROS_ERROR("Failed to move to place position");
-    return false;
+  // Step 2: Vertically move down to place standby position with constraints
+  ROS_INFO("Moving down to place standby position...");
+  
+  // Add path constraint for vertical approach
+  moveit_msgs::Constraints constraints;
+  moveit_msgs::OrientationConstraint ocm;
+  ocm.header.frame_id = base_frame_;
+  ocm.link_name = arm_group_.getEndEffectorLink();
+  ocm.orientation = current_grasp_orientation_;
+  ocm.absolute_x_axis_tolerance = 0.01; // Very strict
+  ocm.absolute_y_axis_tolerance = 0.01; // Very strict
+  ocm.absolute_z_axis_tolerance = 0.01; // Very strict
+  ocm.weight = 1.0;
+  
+  // Add position constraint to only allow Z-axis movement
+  moveit_msgs::PositionConstraint pcm;
+  pcm.header.frame_id = base_frame_;
+  pcm.link_name = arm_group_.getEndEffectorLink();
+  
+  // Create a box constraint that only allows movement in Z direction
+  shape_msgs::SolidPrimitive box;
+  box.type = shape_msgs::SolidPrimitive::BOX;
+  box.dimensions.resize(3);
+  box.dimensions[0] = 0.002; // Small tolerance in X
+  box.dimensions[1] = 0.002; // Small tolerance in Y
+  box.dimensions[2] = 1.0;   // Allow movement in Z
+  
+  // Set the box position to allow vertical movement
+  geometry_msgs::Pose box_pose;
+  box_pose.position.x = place_point.x;
+  box_pose.position.y = place_point.y;
+  box_pose.position.z = (horizontal_move_pose.pose.position.z + place_standby_pose.pose.position.z) / 2.0;
+  box_pose.orientation.w = 1.0;
+  
+  pcm.constraint_region.primitives.push_back(box);
+  pcm.constraint_region.primitive_poses.push_back(box_pose);
+  pcm.weight = 1.0;
+  
+  constraints.orientation_constraints.push_back(ocm);
+  constraints.position_constraints.push_back(pcm);
+  
+  arm_group_.setPathConstraints(constraints);
+  
+  // Try with constraints to move to place standby
+  bool place_standby_success = moveArm(place_standby_pose);
+  
+  // Clear constraints
+  arm_group_.clearPathConstraints();
+  
+  if (!place_standby_success) {
+    ROS_WARN("Failed to move to place standby with constraints, trying without constraints");
+    place_standby_success = moveArm(place_standby_pose);
+    if (!place_standby_success) {
+      ROS_ERROR("Failed to move to place standby position");
+      return false;
+    }
   }
   
-  // Open gripper to release object
+  // Step 3: Open gripper to release object at standby position
   ROS_INFO("Opening gripper to release object...");
   bool open_success = moveGripper(gripper_open_, 2.0);
   if (!open_success) {
@@ -624,13 +695,8 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
     return false;
   }
   
-  // Move back up to standby position
-  ROS_INFO("Moving back to place standby position...");
-  bool retreat_success = moveArm(place_standby_pose);
-  if (!retreat_success) {
-    ROS_ERROR("Failed to retreat to place standby position");
-    return false;
-  }
+  // Pause briefly to allow object to fall
+  ros::Duration(0.5).sleep();
   
   ROS_INFO("====== PLACE EXECUTION COMPLETED ======\n");
   return true;
@@ -1598,4 +1664,43 @@ void cw2::visualizeGraspPoint(const geometry_msgs::Point &grasp_point, const tf2
   
   ROS_INFO("Published grasp point visualization at [%f, %f, %f]",
            grasp_point.x, grasp_point.y, grasp_point.z);
+}
+
+// Add this function to create and add a floor collision object
+void cw2::addFloorCollisionObject() {
+  ROS_INFO("Adding floor collision object to planning scene");
+  
+  // Create a collision object message
+  moveit_msgs::CollisionObject floor_object;
+  floor_object.header.frame_id = base_frame_;
+  floor_object.id = "floor";
+  
+  // Define the floor dimensions (1.2m x 1.2m x 0.01m)
+  shape_msgs::SolidPrimitive primitive;
+  primitive.type = primitive.BOX;
+  primitive.dimensions.resize(3);
+  primitive.dimensions[0] = 1.2;  // X dimension
+  primitive.dimensions[1] = 1.2;  // Y dimension
+  primitive.dimensions[2] = 0.01; // Z dimension (height)
+  
+  // Define the floor pose (center at 0, 0, 0)
+  geometry_msgs::Pose floor_pose;
+  floor_pose.orientation.w = 1.0;
+  floor_pose.position.x = 0.0;
+  floor_pose.position.y = 0.0;
+  floor_pose.position.z = -0.005; // Place slightly below 0 to avoid grazing the surface
+  
+  // Add the primitive and pose to the collision object
+  floor_object.primitives.push_back(primitive);
+  floor_object.primitive_poses.push_back(floor_pose);
+  floor_object.operation = floor_object.ADD;
+  
+  // Add the collision object to the vector
+  collision_object_vector_.push_back(floor_object);
+  
+  // Add the collision object to the planning scene
+  moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
+  planning_scene_interface.addCollisionObjects(collision_object_vector_);
+  
+  ROS_INFO("Floor collision object added to planning scene");
 }
