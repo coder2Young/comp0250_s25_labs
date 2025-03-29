@@ -23,12 +23,15 @@ solution is contained within the cw2_team_<your_team_number> package */
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
+#include <moveit/trajectory_processing/iterative_time_parameterization.h>
 // TF specific includes
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Scalar.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf/tf.h>
+#include <tf2/utils.h>
+#include <tf2_eigen/tf2_eigen.h>
 // Camera specific includes
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/CameraInfo.h>
@@ -107,6 +110,7 @@ struct ObjectOrientationData {
   Eigen::Vector3f edge_direction;  // Optimal edge direction for grasping nought objects
   float grasp_angle;               // Computed angle for gripper rotation around Z
   bool is_valid;                   // Indicates if the orientation data is valid
+  float flatness_ratio;
 };
 
 class cw2
@@ -293,6 +297,12 @@ public:
   // Current lift height for horizontal movement to place
   double current_lift_height_;
 
+  // 添加抓取姿态计算函数声明
+  geometry_msgs::PoseStamped calculateGraspPose(
+      const Eigen::Vector4f& centroid,
+      bool is_cross,
+      const ObjectOrientationData& orientation);
+
 private:
   // Euclidean clustering parameters
   float cluster_tolerance_;   // Distance threshold for clustering
@@ -340,6 +350,31 @@ private:
   // Task 3 scanning and grasping parameters
   float t3_scan_height_;          // Height for scanning the scene in Task 3
   float t3_grasp_height_offset_;  // Z-offset to adjust grasp points upward
+
+  // Continuous scanning parameters and state
+  std::vector<PointCPtr> collected_clouds_;
+  bool is_collecting_clouds_;
+  int cloud_frame_counter_;
+  int t3_pointcloud_save_interval_;  // Save every Nth frame
+  float t3_continuous_scan_voxel_size_; // Voxel filter size during continuous scanning
+  
+  // New cloud callback and processing methods
+  void continuousScanCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg);
+  bool isGreenPoint(const PointT& point);
+  PointCPtr mergeClouds(const std::vector<PointCPtr>& clouds);
+
+  // New continuous scanning method (different name to avoid redefinition)
+  PointCPtr continuousScanSceneFromMultipleViewpoints();
+
+  // Helper method for Cartesian path execution
+  bool moveAlongCartesianPath(
+      const std::vector<geometry_msgs::Pose>& waypoints,
+      double eef_step,
+      double jump_threshold,
+      double speed_factor);
+
+  // Point cloud subscriber - always active
+  ros::Subscriber cloud_sub_;
 };
 
 #endif // end of include guard for cw2_CLASS_H_

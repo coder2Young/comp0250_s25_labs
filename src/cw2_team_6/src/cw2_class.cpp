@@ -16,7 +16,9 @@ cw2::cw2(ros::NodeHandle nh):
   scan_radius_(0.2),          // 20cm radius around object 
   scan_height_offset_(0.3),   // 30cm above object height
   num_scan_poses_(4),          // 4 positions around the object
-  pick_lift_offset_(0.5)       // 0.5m lifting position after grasping
+  pick_lift_offset_(0.5),       // 0.5m lifting position after grasping
+  arm_group_("panda_arm"),
+  hand_group_("hand")
 {
   /* class constructor */
 
@@ -61,6 +63,15 @@ cw2::cw2(ros::NodeHandle nh):
   clusters_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/object_clusters", 1, true);
   obstacles_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/obstacles_cloud", 1, true);
   all_pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/all_pca_axes", 1, true);
+
+  // Always subscribe to point cloud topic
+  cloud_sub_ = nh_.subscribe("/r200/camera/depth_registered/points", 1, &cw2::continuousScanCloudCallback, this);
+  
+  ROS_INFO("Point cloud subscriber initialized");
+  
+  // Set the initial collection state to false
+  is_collecting_clouds_ = false;
+  cloud_frame_counter_ = 0;
 }
 
 cw2::~cw2() {
@@ -134,6 +145,14 @@ cw2::cw2_config()
   // Task 3 specific parameters
   t3_scan_height_ = 0.65;           // Height for scanning the entire scene (lowered from 0.6)
   t3_grasp_height_offset_ = -0.1;    // Add 10cm to Z coordinate of all grasp points to compensate for low point cloud values
+
+  // Continuous scanning parameters
+  t3_pointcloud_save_interval_ = 10;     // Process every 10th frame
+  t3_continuous_scan_voxel_size_ = 0.005; // 5mm voxel size for downsampling
+  
+  // Initialize scanning state
+  is_collecting_clouds_ = false;
+  cloud_frame_counter_ = 0;
 
   return;
 }
@@ -525,7 +544,7 @@ bool cw2::planAndExecuteGrasp(
   
   // Add orientation constraint for smoother movement
   moveit_msgs::OrientationConstraint ocm;
-  ocm.link_name = "ee_link";
+  ocm.link_name = "panda_link7";
   ocm.header.frame_id = base_frame_;
   ocm.orientation = grasp_pose.pose.orientation;
   ocm.absolute_x_axis_tolerance = 0.1;
@@ -608,7 +627,7 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
   
   // Add orientation constraint for smoother movement
   moveit_msgs::OrientationConstraint ocm;
-  ocm.link_name = "ee_link";
+  ocm.link_name = "panda_link7";
   ocm.header.frame_id = base_frame_;
   ocm.orientation = place_pose.pose.orientation;
   ocm.absolute_x_axis_tolerance = 0.1;
@@ -934,7 +953,8 @@ cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   
   // 1. Scan the scene from multiple viewpoints and merge the point clouds
   ROS_INFO("====== SCANNING SCENE FROM MULTIPLE VIEWPOINTS ======");
-  PointCPtr merged_cloud = scanSceneFromMultipleViewpoints();
+  // Use new continuous scanning method instead of the original
+  PointCPtr merged_cloud = continuousScanSceneFromMultipleViewpoints();
   
   if (merged_cloud->empty()) {
     ROS_ERROR("Failed to get valid point cloud data from scanning");
@@ -1507,12 +1527,10 @@ bool cw2::clusterAndClassifyObjects(
       ROS_WARN("Could not determine valid orientation for cluster %zu, skipping", i+1);
     }
     
-    // 为该聚类分配一个唯一颜色用于可视化
     uint8_t r = 50 + (i * 40) % 200;
     uint8_t g = 50 + ((i * 70) % 200);
     uint8_t b = 50 + ((i * 90) % 200);
-    
-    // 为聚类中的每个点设置颜色，并添加到可视化点云
+
     for (const auto& idx : cluster_indices[i].indices) {
       PointT colored_point = objects_cloud->points[idx];
       colored_point.r = r;
@@ -2411,4 +2429,408 @@ void cw2::addFloorCollisionObject() {
   planning_scene_interface.addCollisionObjects(collision_object_vector_);
   
   ROS_INFO("Floor collision object added to planning scene");
+}
+
+/**
+ * Callback for point cloud data during continuous scanning
+ * Processes and stores point clouds with optimizations:
+ * - Downsamples using voxel grid
+ * - Filters out green floor points immediately
+ * - Only processes every N frames based on interval setting
+ */
+void cw2::continuousScanCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg) {
+  // Only process if we're in collection mode
+  if (!is_collecting_clouds_) {
+    return;
+  }
+  
+  // Increment counter and only process every Nth frame
+  cloud_frame_counter_++;
+  if (cloud_frame_counter_ % t3_pointcloud_save_interval_ != 0) {
+    return;
+  }
+  
+  ROS_INFO("Processing cloud frame %d", cloud_frame_counter_);
+  
+  // Convert ROS message to PCL
+  PointCPtr cloud(new PointC);
+  pcl::fromROSMsg(*msg, *cloud);
+  
+  // Transform to base frame
+  PointCPtr transformed_cloud(new PointC);
+  if (!msg->header.frame_id.empty() && msg->header.frame_id != base_frame_) {
+    try {
+      geometry_msgs::TransformStamped transform = 
+          tf_buffer_.lookupTransform(base_frame_, msg->header.frame_id, ros::Time(0));
+      
+      // Use pcl_ros transform function directly instead of Eigen conversion
+      pcl_ros::transformPointCloud(*cloud, *transformed_cloud, transform.transform);
+    } catch (tf2::TransformException &ex) {
+      ROS_WARN("Could not transform point cloud from %s to %s: %s", 
+               msg->header.frame_id.c_str(), base_frame_.c_str(), ex.what());
+      return;
+    }
+  } else {
+    *transformed_cloud = *cloud;
+  }
+  
+  // Filter out green points (floor)
+  PointCPtr non_green_cloud(new PointC);
+  for (const auto& point : transformed_cloud->points) {
+    if (!isGreenPoint(point)) {
+      non_green_cloud->points.push_back(point);
+    }
+  }
+  non_green_cloud->width = non_green_cloud->points.size();
+  non_green_cloud->height = 1;
+  non_green_cloud->is_dense = false;
+  
+  // Skip if empty after green filtering
+  if (non_green_cloud->empty()) {
+    return;
+  }
+  
+  // Downsample using voxel grid filter
+  PointCPtr downsampled_cloud(new PointC);
+  pcl::VoxelGrid<PointT> voxel_filter;
+  voxel_filter.setInputCloud(non_green_cloud);
+  voxel_filter.setLeafSize(t3_continuous_scan_voxel_size_, 
+                          t3_continuous_scan_voxel_size_, 
+                          t3_continuous_scan_voxel_size_);
+  voxel_filter.filter(*downsampled_cloud);
+  
+  // Store the processed cloud
+  collected_clouds_.push_back(downsampled_cloud);
+  
+  // Publish for visualization (optional, can be disabled to save resources)
+  if (debug_) {
+    publishPointCloud(downsampled_cloud, cloud_filtered_pub_);
+  }
+}
+
+/**
+ * Check if a point is likely part of the green floor
+ * Uses a simple HSV-based color filter
+ */
+bool cw2::isGreenPoint(const PointT& point) {
+  // Convert RGB to HSV
+  float r = point.r / 255.0f;
+  float g = point.g / 255.0f;
+  float b = point.b / 255.0f;
+  
+  float max_val = std::max(std::max(r, g), b);
+  float min_val = std::min(std::min(r, g), b);
+  float diff = max_val - min_val;
+  
+  float h = 0.0f;
+  if (max_val == r) {
+    h = 60.0f * fmod(((g - b) / diff), 6.0f);
+  } else if (max_val == g) {
+    h = 60.0f * (((b - r) / diff) + 2.0f);
+  } else {
+    h = 60.0f * (((r - g) / diff) + 4.0f);
+  }
+  
+  if (h < 0.0f) h += 360.0f;
+  
+  float s = (max_val == 0.0f) ? 0.0f : (diff / max_val);
+  float v = max_val;
+  
+  // Green floor HSV ranges (adjust as needed for your environment)
+  // Typically green is around H=120, but range may vary
+  return (h >= 90.0f && h <= 150.0f && s >= 0.2f && v >= 0.2f);
+}
+
+/**
+ * Merge multiple point clouds into one
+ * Simply concatenates all points from input clouds
+ */
+PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
+  PointCPtr merged_cloud(new PointC);
+  
+  // Return empty cloud if no input
+  if (clouds.empty()) {
+    return merged_cloud;
+  }
+  
+  // Count total points
+  size_t total_points = 0;
+  for (const auto& cloud : clouds) {
+    total_points += cloud->points.size();
+  }
+  
+  // Reserve space for all points
+  merged_cloud->points.reserve(total_points);
+  
+  // Merge all clouds
+  for (const auto& cloud : clouds) {
+    merged_cloud->points.insert(merged_cloud->points.end(), 
+                               cloud->points.begin(), 
+                               cloud->points.end());
+  }
+  
+  // Set cloud parameters
+  merged_cloud->width = merged_cloud->points.size();
+  merged_cloud->height = 1;
+  merged_cloud->is_dense = false;
+  
+  // Final voxel grid filter to ensure even distribution of points
+  PointCPtr final_cloud(new PointC);
+  pcl::VoxelGrid<PointT> voxel_filter;
+  voxel_filter.setInputCloud(merged_cloud);
+  voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f); // 5mm final resolution
+  voxel_filter.filter(*final_cloud);
+  
+  ROS_INFO("Merged %zu clouds with total %zu points, downsampled to %zu points",
+          clouds.size(), total_points, final_cloud->points.size());
+          
+  return final_cloud;
+}
+
+/**
+ * Performs a continuous scanning motion to capture the entire scene
+ * Breaks the rectangular path into separate segments for better planning
+ * 
+ * @return Merged point cloud of the entire scene
+ */
+PointCPtr cw2::continuousScanSceneFromMultipleViewpoints() {
+  ROS_INFO("Starting continuous scanning motion...");
+  
+  // Reset collection variables
+  collected_clouds_.clear();
+  cloud_frame_counter_ = 0;
+  is_collecting_clouds_ = true;  // Start collecting clouds
+  
+  // Define rectangular path parameters
+  float rect_x_min = -0.45;
+  float rect_x_max = 0.45;
+  float rect_y_min = -0.35;
+  float rect_y_max = 0.35;
+  float scan_height = t3_scan_height_;  // Constant height for stable scanning
+  
+  // Get the downward-facing orientation (end effector pointing down)
+  tf2::Quaternion q_down;
+  q_down.setRPY(-M_PI, 0, 0);  // Roll -180 degrees (camera pointing down)
+  geometry_msgs::Quaternion down_orientation = tf2::toMsg(q_down);
+  
+  // Number of points along each edge of the rectangle
+  int points_per_edge = 5;
+  double eef_step = 0.02;       // 2cm resolution for path
+  double jump_threshold = 0.0;  // Disable jump threshold
+  
+  // First move to the starting position (bottom-left corner)
+  geometry_msgs::PoseStamped start_pose;
+  start_pose.header.frame_id = base_frame_;
+  start_pose.pose.position.x = rect_x_min;
+  start_pose.pose.position.y = rect_y_min;
+  start_pose.pose.position.z = scan_height;
+  start_pose.pose.orientation = down_orientation;
+  
+  ROS_INFO("Moving to initial scanning position...");
+  bool success = moveArm(start_pose);
+  if (!success) {
+    ROS_WARN("Failed to move to initial scanning position. Using current position.");
+  }
+  
+  // Wait for a moment to start collecting data
+  ros::Duration(1.0).sleep();
+  
+  // Now execute each edge as a separate Cartesian path
+  float speed_factor = 0.05;
+  
+  // Edge 1: Bottom edge (x from min to max, y = min)
+  std::vector<geometry_msgs::Pose> edge1_waypoints;
+  for (int i = 0; i <= points_per_edge; i++) {
+    float x = rect_x_min + i * (rect_x_max - rect_x_min) / points_per_edge;
+    
+    geometry_msgs::Pose pose;
+    pose.position.x = x;
+    pose.position.y = rect_y_min;
+    pose.position.z = scan_height;
+    pose.orientation = down_orientation;
+    edge1_waypoints.push_back(pose);
+  }
+  
+  ROS_INFO("Scanning bottom edge...");
+  moveAlongCartesianPath(edge1_waypoints, eef_step, jump_threshold, speed_factor); // Slowed down to 20% speed
+  
+  // Edge 2: Right edge (x = max, y from min to max)
+  std::vector<geometry_msgs::Pose> edge2_waypoints;
+  for (int i = 0; i <= points_per_edge; i++) {
+    float y = rect_y_min + i * (rect_y_max - rect_y_min) / points_per_edge;
+    
+    geometry_msgs::Pose pose;
+    pose.position.x = rect_x_max;
+    pose.position.y = y;
+    pose.position.z = scan_height;
+    pose.orientation = down_orientation;
+    edge2_waypoints.push_back(pose);
+  }
+  
+  ROS_INFO("Scanning right edge...");
+  moveAlongCartesianPath(edge2_waypoints, eef_step, jump_threshold, speed_factor); // Slowed down to 20% speed
+  
+  // Edge 3: Top edge (x from max to min, y = max)
+  std::vector<geometry_msgs::Pose> edge3_waypoints;
+  for (int i = 0; i <= points_per_edge; i++) {
+    float x = rect_x_max - i * (rect_x_max - rect_x_min) / points_per_edge;
+    
+    geometry_msgs::Pose pose;
+    pose.position.x = x;
+    pose.position.y = rect_y_max;
+    pose.position.z = scan_height;
+    pose.orientation = down_orientation;
+    edge3_waypoints.push_back(pose);
+  }
+  
+  ROS_INFO("Scanning top edge...");
+  moveAlongCartesianPath(edge3_waypoints, eef_step, jump_threshold, speed_factor); // Slowed down to 20% speed
+  
+  // Edge 4: Left edge (x = min, y from max to min)
+  std::vector<geometry_msgs::Pose> edge4_waypoints;
+  for (int i = 0; i <= points_per_edge; i++) {
+    float y = rect_y_max - i * (rect_y_max - rect_y_min) / points_per_edge;
+    
+    geometry_msgs::Pose pose;
+    pose.position.x = rect_x_min;
+    pose.position.y = y;
+    pose.position.z = scan_height;
+    pose.orientation = down_orientation;
+    edge4_waypoints.push_back(pose);
+  }
+  
+  ROS_INFO("Scanning left edge...");
+  moveAlongCartesianPath(edge4_waypoints, eef_step, jump_threshold, speed_factor); // Slowed down to 20% speed
+  
+  // Stop collecting clouds
+  is_collecting_clouds_ = false;
+  
+  // Wait for callbacks to complete
+  ROS_INFO("Waiting for final callbacks to complete...");
+  ros::Duration(2.0).sleep();
+  
+  // Merge collected clouds
+  ROS_INFO("Merging %zu collected clouds...", collected_clouds_.size());
+  PointCPtr merged_scene = mergeClouds(collected_clouds_);
+  
+  // Free memory
+  collected_clouds_.clear();
+  
+  ROS_INFO("Continuous scanning complete, collected %d point clouds", cloud_frame_counter_);
+  
+  return merged_scene;
+}
+
+/**
+ * Helper method to move the arm along a Cartesian path
+ * @param waypoints List of poses defining the path
+ * @param eef_step Step size for end effector
+ * @param jump_threshold Jump threshold (0.0 to disable)
+ * @param speed_factor Speed factor (0.0-1.0, lower is slower)
+ * @return true if successful
+ */
+bool cw2::moveAlongCartesianPath(
+    const std::vector<geometry_msgs::Pose>& waypoints,
+    double eef_step,
+    double jump_threshold,
+    double speed_factor) {
+  
+  moveit_msgs::RobotTrajectory trajectory;
+  double fraction = arm_group_.computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
+  
+  if (fraction > 0.5) {  // Accept the path if at least 50% is achievable
+    // Slow down the trajectory for better scanning
+    robot_trajectory::RobotTrajectory rt(arm_group_.getCurrentState()->getRobotModel(), "panda_arm");
+    rt.setRobotTrajectoryMsg(*arm_group_.getCurrentState(), trajectory);
+    
+    trajectory_processing::IterativeParabolicTimeParameterization iptp;
+    iptp.computeTimeStamps(rt, speed_factor);
+    rt.getRobotTrajectoryMsg(trajectory);
+    
+    // Execute the trajectory
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    plan.trajectory_ = trajectory;
+    
+    ROS_INFO("Executing Cartesian trajectory (%.1f%% coverage) with %zu waypoints...",
+            fraction * 100.0, waypoints.size());
+    arm_group_.execute(plan);
+    return true;
+  } else {
+    ROS_WARN("Could only compute %.1f%% of the desired Cartesian path, aborting this segment",
+            fraction * 100.0);
+    return false;
+  }
+}
+
+/**
+ * Calculates a grasp pose aligned with object orientation
+ * Based on the original Task 1 grasp approach
+ * 
+ * @param centroid Object centroid
+ * @param is_cross Whether the object is a cross (true) or nought (false)
+ * @param orientation PCA orientation data for the object
+ * @return Grasp pose for the object
+ */
+geometry_msgs::PoseStamped cw2::calculateGraspPose(
+    const Eigen::Vector4f& centroid,
+    bool is_cross,
+    const ObjectOrientationData& orientation) {
+  
+  geometry_msgs::PoseStamped grasp_pose;
+  grasp_pose.header.frame_id = base_frame_;
+  
+  // Set the position to the object centroid with height offset
+  grasp_pose.pose.position.x = centroid[0];
+  grasp_pose.pose.position.y = centroid[1];
+  grasp_pose.pose.position.z = centroid[2] + t3_grasp_height_offset_;
+  
+  // Use the same grasp orientation approach as in Task 1
+  // Get the default grasp orientation - from task1, this is defined as:
+  // - Gripper pointing downward
+  // - Fingers oriented along Y-axis
+  tf2::Quaternion grasp_orientation;
+  
+  // For Task 1, the orientation was typically set to the gripper pointing downward
+  // We'll use that as our base orientation
+  grasp_orientation.setRPY(-M_PI/2, -M_PI/4, 0);  
+  
+  // For Task 3, we adjust based on the object's principal axis
+  if (orientation.is_valid) {
+    // Extract direction in X-Y plane
+    Eigen::Vector3f primary_axis_xy = orientation.primary_axis;
+    primary_axis_xy[2] = 0;  // Project to XY plane
+    if (primary_axis_xy.norm() > 0.001) {
+      primary_axis_xy.normalize();
+      
+      // Calculate rotation around Z to align with object axis
+      float angle_z = std::atan2(primary_axis_xy[1], primary_axis_xy[0]);
+      
+      // Create rotation around Z
+      tf2::Quaternion object_rotation;
+      object_rotation.setRPY(0, 0, angle_z);
+      
+      // Combine with default orientation
+      grasp_orientation = object_rotation * grasp_orientation;
+      grasp_orientation.normalize();
+    }
+  }
+  
+  // Convert to geometry_msgs quaternion
+  grasp_pose.pose.orientation = tf2::toMsg(grasp_orientation);
+  
+  // Adjust grasp position based on shape
+  if (!is_cross) {
+    // For noughts, we want to grasp from the edge
+    // Add a slight offset along the primary axis
+    float edge_offset = 0.01; // 1cm offset for grasping the edge
+    grasp_pose.pose.position.x += orientation.primary_axis[0] * edge_offset;
+    grasp_pose.pose.position.y += orientation.primary_axis[1] * edge_offset;
+  }
+  
+  ROS_INFO("Calculated grasp pose at [%.3f, %.3f, %.3f] with orientation [%.3f, %.3f, %.3f, %.3f]",
+          grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z,
+          grasp_pose.pose.orientation.x, grasp_pose.pose.orientation.y,
+          grasp_pose.pose.orientation.z, grasp_pose.pose.orientation.w);
+  
+  return grasp_pose;
 }
