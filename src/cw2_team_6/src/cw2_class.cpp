@@ -46,6 +46,10 @@ cw2::cw2(ros::NodeHandle nh):
   octomap_sub_ = nh_.subscribe("/octomap_binary", 1, &cw2::octomap_callback, this);
   octomap_client_ = nh_.serviceClient<octomap_msgs::GetOctomap>("/octomap_full");
 
+  planning_scene_monitor_.startSceneMonitor(); 
+  planning_scene_monitor_.startWorldGeometryMonitor();  
+  planning_scene_monitor_.startStateMonitor(); 
+
   cw2_config();
   
   ROS_INFO("cw2 class initialised");

@@ -22,6 +22,7 @@ solution is contained within the cw2_team_<your_team_number> package */
 // MoveIt specific includes
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 // TF specific includes
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Scalar.h>
@@ -156,6 +157,7 @@ public:
   moveit::planning_interface::MoveGroupInterface arm_group_{"panda_arm"};
   moveit::planning_interface::MoveGroupInterface hand_group_{"hand"};
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
+  planning_scene_monitor::PlanningSceneMonitor planning_scene_monitor_{"robot_description"};
 
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
