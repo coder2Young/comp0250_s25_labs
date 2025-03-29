@@ -52,6 +52,8 @@ solution is contained within the cw2_team_<your_team_number> package */
 #include <pcl/common/pca.h>
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/statistical_outlier_removal.h>
+#include <pcl/filters/crop_box.h>
+#include <pcl/common/common.h>
 // standard c++ library includes (std::string, std::vector)
 #include <string>
 #include <vector>
@@ -301,6 +303,43 @@ private:
   float t2_shape_determine_radius_;  // Radius to check for center points in Task 2
   float t2_shape_determine_z_offset_; // Z offset for center point in Task 2
   int t2_shape_determine_min_points_; // Minimum number of points to be confident in Task 2
+
+  // Task 3 helper methods
+  PointCPtr scanSceneFromMultipleViewpoints();
+  PointCPtr filterOutGreenFloor(const PointCPtr& cloud);
+  PointCPtr extractBrownBasket(const PointCPtr& cloud);
+  geometry_msgs::Point findBasketCenter(const PointCPtr& basket_cloud);
+  PointCPtr extractBlackObstacles(const PointCPtr& cloud);
+  void addObstaclesToPlanningScene(const PointCPtr& obstacles_cloud);
+  PointCPtr extractGraspableObjects(const PointCPtr& cloud);
+  bool clusterAndClassifyObjects(
+      const PointCPtr& objects_cloud,
+      std::vector<PointCPtr>& object_clusters,
+      std::vector<bool>& is_cross_shape,
+      std::vector<ObjectOrientationData>& object_orientations);
+  bool graspAndPlaceObjectsOfType(
+      const std::vector<PointCPtr>& object_clusters,
+      const std::vector<bool>& is_cross_shape,
+      const std::vector<ObjectOrientationData>& object_orientations,
+      bool grasp_cross_shape,
+      const geometry_msgs::Point& basket_center);
+
+  // PCA轴可视化辅助函数
+  visualization_msgs::MarkerArray createPCAAxesMarkers(
+      const Eigen::Vector4f& centroid,
+      const Eigen::Vector3f& primary_axis,
+      const Eigen::Vector3f& secondary_axis,
+      int id_offset,
+      const std::string& shape_type);
+  
+  // 补充的可视化发布者
+  ros::Publisher clusters_pub_;           // 为聚类后的对象点云
+  ros::Publisher obstacles_cloud_pub_;    // 为障碍物点云
+  ros::Publisher all_pca_axes_pub_;       // 为所有物体的 PCA 轴
+
+  // Task 3 scanning and grasping parameters
+  float t3_scan_height_;          // Height for scanning the scene in Task 3
+  float t3_grasp_height_offset_;  // Z-offset to adjust grasp points upward
 };
 
 #endif // end of include guard for cw2_CLASS_H_

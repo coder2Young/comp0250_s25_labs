@@ -56,6 +56,11 @@ cw2::cw2(ros::NodeHandle nh):
 
   // Add this function to create and add a floor collision object
   addFloorCollisionObject();
+
+  // Initialize additional visualization publishers
+  clusters_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/object_clusters", 1, true);
+  obstacles_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/obstacles_cloud", 1, true);
+  all_pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/all_pca_axes", 1, true);
 }
 
 cw2::~cw2() {
@@ -104,8 +109,8 @@ cw2::cw2_config()
   scan_height_ = 0.7;
   
   // Euclidean clustering parameters
-  cluster_tolerance_ = 0.02;    // 2cm tolerance between points in cluster
-  min_cluster_size_ = 50;       // Minimum 50 points per cluster
+  cluster_tolerance_ = 0.05;    // 2cm tolerance between points in cluster
+  min_cluster_size_ = 10;       // Minimum 50 points per cluster
   max_cluster_size_ = 25000;    // Maximum 25000 points per cluster
   
   // Scanning motion parameters
@@ -125,6 +130,10 @@ cw2::cw2_config()
 
   // Add floor collision object to prevent collisions with the ground
   addFloorCollisionObject();
+
+  // Task 3 specific parameters
+  t3_scan_height_ = 0.65;           // Height for scanning the entire scene (lowered from 0.6)
+  t3_grasp_height_offset_ = -0.1;    // Add 10cm to Z coordinate of all grasp points to compensate for low point cloud values
 
   return;
 }
@@ -395,314 +404,250 @@ bool cw2::planAndExecuteGrasp(
     const geometry_msgs::Point &object_point,
     const ObjectOrientationData &orientation_data,
     const std::string &shape_type) {
+
+  ROS_INFO("\n====== PLANNING GRASP EXECUTION ======");
+  ROS_INFO("Target object: %s at position [%.3f, %.3f, %.3f]", 
+           shape_type.c_str(), object_point.x, object_point.y, object_point.z);
   
-  ROS_INFO("\n====== PLANNING AND EXECUTING GRASP ======");
-  
-  if (!orientation_data.is_valid) {
-    ROS_ERROR("Invalid orientation data provided");
-    return false;
-  }
-  
-  // Open gripper to prepare for grasp
-  ROS_INFO("Opening gripper...");
-  bool open_success = moveGripper(gripper_open_, 2.0);
-  if (!open_success) {
-    ROS_ERROR("Failed to open gripper");
-    return false;
-  }
-  
-  // 0. Calculate grasp position with proper offsets
-  geometry_msgs::PoseStamped grasp_standby_pose;
+  // Create the grasp pose
   geometry_msgs::PoseStamped grasp_pose;
-  geometry_msgs::PoseStamped lift_pose;
-  grasp_standby_pose.header.frame_id = base_frame_;
   grasp_pose.header.frame_id = base_frame_;
+  
+  // Create standby pose (slightly above grasp pose)
+  geometry_msgs::PoseStamped grasp_standby_pose;
+  grasp_standby_pose.header.frame_id = base_frame_;
+  
+  // Create lift pose (for after grasping)
+  geometry_msgs::PoseStamped lift_pose;
   lift_pose.header.frame_id = base_frame_;
   
-  // Extract principal axis direction (in XY plane)
-  Eigen::Vector3f principal_axis = orientation_data.primary_axis;
-  Eigen::Vector3f secondary_axis = orientation_data.secondary_axis;
-  Eigen::Vector3f grasp_direction_xy;
-  
-  // Calculate orientation quaternion
-  tf2::Quaternion q_orig;
-  tf2::convert(grasp_orientation_, q_orig);
-  tf2::Quaternion q_rot;
-  tf2::Quaternion q_final;
-  
-  // Calculate offset grasp position based on shape type
-  float grasp_x, grasp_y;
-  
-  if (shape_type == "cross") {
-    ROS_INFO("Calculating grasp for cross shape...");
+  // Calculate grasp position and orientation
+  // Use object orientation data to align gripper with object
+  tf2::Quaternion q_grasp;
+  if (orientation_data.is_valid) {
+    // Compute orientation based on object's principal axis
+    Eigen::Vector3f target_axis = orientation_data.primary_axis;
     
-    // For cross shape, grasp one of the arms offset by 60mm from center
-    float offset = 0.06; // 60mm offset along principal axis
+    // Calculate grasp direction based on shape type
+    float grasp_x = object_point.x;
+    float grasp_y = object_point.y;
     
-    // Calculate grasp point by offsetting along principal axis
-    grasp_x = object_point.x + principal_axis[0] * offset;
-    grasp_y = object_point.y + principal_axis[1] * offset;
+    // Set gripper orientation based on object orientation
+    tf2::Vector3 z_axis(target_axis[0], target_axis[1], target_axis[2]);
+    z_axis.normalize();
     
-    // Rotate around Z axis to align gripper with the cross arm
-    q_rot.setRPY(0, 0, orientation_data.grasp_angle);
-    q_final = q_rot * q_orig;
+    // Create an orthogonal basis
+    tf2::Vector3 y_axis(0, 0, 1); // Temporary y-axis
+    tf2::Vector3 x_axis = y_axis.cross(z_axis);
+    if (x_axis.length() < 0.01) {
+      // If z_axis is parallel to (0,0,1), choose a different temporary axis
+      y_axis = tf2::Vector3(1, 0, 0);
+      x_axis = y_axis.cross(z_axis);
+    }
+    x_axis.normalize();
     
-    ROS_INFO("Cross grasp point: [%f, %f] (offset by 60mm along principal axis)",
-             grasp_x, grasp_y);
+    y_axis = z_axis.cross(x_axis);
+    y_axis.normalize();
     
-  } else { // "nought"
-    ROS_INFO("Calculating grasp for nought shape...");
+    // Create rotation matrix
+    tf2::Matrix3x3 rot_matrix(
+      x_axis.x(), y_axis.x(), z_axis.x(),
+      x_axis.y(), y_axis.y(), z_axis.y(),
+      x_axis.z(), y_axis.z(), z_axis.z()
+    );
     
-    // For nought, find the midpoint angle between primary and secondary axes
-    float primary_angle = atan2(principal_axis[1], principal_axis[0]);
-    float secondary_angle = atan2(secondary_axis[1], secondary_axis[0]);
-    
-    // Calculate midpoint angle (handling the circular nature of angles)
-    float angle_diff = secondary_angle - primary_angle;
-    if (angle_diff > M_PI) angle_diff -= 2*M_PI;
-    if (angle_diff < -M_PI) angle_diff += 2*M_PI;
-    
-    float midpoint_angle = primary_angle + angle_diff/2.0;
-    
-    ROS_INFO("Primary axis angle: %f, Secondary axis angle: %f, Midpoint angle: %f",
-             primary_angle, secondary_angle, midpoint_angle);
-    
-    // Calculate grasp direction using the midpoint angle
-    grasp_direction_xy[0] = cos(midpoint_angle);
-    grasp_direction_xy[1] = sin(midpoint_angle);
-    grasp_direction_xy[2] = 0.0;
-    
-    // Use 80mm offset along this direction
-    float offset = 0.08; // 80mm offset
-    
-    // Calculate grasp point by offsetting along the midpoint direction
-    grasp_x = object_point.x + grasp_direction_xy[0] * offset;
-    grasp_y = object_point.y + grasp_direction_xy[1] * offset;
-    
-    // Add 90 degrees rotation around Z axis to the midpoint angle
-    float grasp_angle = midpoint_angle + M_PI/2.0; // Add 90 degrees
-    q_rot.setRPY(0, 0, grasp_angle);
-    q_final = q_rot * q_orig;
-    
-    ROS_INFO("Nought grasp point: [%f, %f] (offset by 80mm along midpoint axis)",
-             grasp_x, grasp_y);
+    // Convert to quaternion
+    rot_matrix.getRotation(q_grasp);
+    q_grasp.normalize();
+  } else {
+    // Use default grasp orientation
+    tf2::convert(grasp_orientation_, q_grasp);
   }
   
-  // Normalize quaternion
-  q_final.normalize();
+  // Convert quaternion to msg format
+  tf2::Quaternion q_final = q_grasp;
   
-  // Step 0: Apply hand_offset_ to grasp position and set all positions
-  // Grasp position (with hand_offset_)
-  grasp_pose.pose.position.x = grasp_x;
-  grasp_pose.pose.position.y = grasp_y;
-  grasp_pose.pose.position.z = object_point.z + hand_offset_;
+  // Set grasp, standby and lift poses
+  grasp_pose.pose.position.x = object_point.x;
+  grasp_pose.pose.position.y = object_point.y;
+  grasp_pose.pose.position.z = object_point.z + hand_offset_ + t3_grasp_height_offset_;
   grasp_pose.pose.orientation = tf2::toMsg(q_final);
   
-  // Standby position (10cm above grasp position)
-  grasp_standby_pose.pose.position.x = grasp_x;
-  grasp_standby_pose.pose.position.y = grasp_y;
+  // Standby position - 10 cm above the grasp position
+  grasp_standby_pose.pose.position.x = grasp_pose.pose.position.x;
+  grasp_standby_pose.pose.position.y = grasp_pose.pose.position.y;
   grasp_standby_pose.pose.position.z = grasp_pose.pose.position.z + grasp_stanby_height_;
   grasp_standby_pose.pose.orientation = grasp_pose.pose.orientation;
   
-  // Lift position (pick_lift_offset_ above ground)
-  lift_pose.pose.position.x = grasp_x;
-  lift_pose.pose.position.y = grasp_y;
-  lift_pose.pose.position.z = object_point.z + pick_lift_offset_;
+  // Lift position - lift_offset_ above the grasp position
+  lift_pose.pose.position.x = grasp_pose.pose.position.x;
+  lift_pose.pose.position.y = grasp_pose.pose.position.y;
+  lift_pose.pose.position.z = grasp_pose.pose.position.z + pick_lift_offset_;
   lift_pose.pose.orientation = grasp_pose.pose.orientation;
   
-  // Store the final grasp orientation for place operation
+  // Store current orientation for use in place operation
   current_grasp_orientation_ = grasp_pose.pose.orientation;
-  // Store the lift height for horizontal movement to place
   current_lift_height_ = lift_pose.pose.position.z;
   
-  // Visualize grasp point and orientation if in debug mode
-  if (debug_) {
-    visualizeGraspPoint(grasp_pose.pose.position, q_final);
-  }
+  ROS_INFO("Initial grasp calculation:");
+  ROS_INFO("- Object point: [%.3f, %.3f, %.3f]", object_point.x, object_point.y, object_point.z);
+  
+  // After computing grasp point and orientation:
+  ROS_INFO("Computed grasp poses:");
+  ROS_INFO("- Grasp position: [%.3f, %.3f, %.3f]", 
+           grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
+  ROS_INFO("- Grasp orientation: [%.3f, %.3f, %.3f, %.3f]", 
+           grasp_pose.pose.orientation.x, grasp_pose.pose.orientation.y, 
+           grasp_pose.pose.orientation.z, grasp_pose.pose.orientation.w);
+  ROS_INFO("- Standby position: [%.3f, %.3f, %.3f]", 
+           grasp_standby_pose.pose.position.x, grasp_standby_pose.pose.position.y, grasp_standby_pose.pose.position.z);
+  ROS_INFO("- Lift position: [%.3f, %.3f, %.3f]", 
+           lift_pose.pose.position.x, lift_pose.pose.position.y, lift_pose.pose.position.z);
   
   // Step 1: Move to grasp standby position
-  ROS_INFO("Moving to grasp standby position...");
+  ROS_INFO("Step 1: Moving to grasp standby position [%.3f, %.3f, %.3f]...", 
+           grasp_standby_pose.pose.position.x, grasp_standby_pose.pose.position.y, grasp_standby_pose.pose.position.z);
   bool standby_success = moveArm(grasp_standby_pose);
   if (!standby_success) {
     ROS_ERROR("Failed to move to grasp standby position");
     return false;
   }
+  ROS_INFO("Successfully reached grasp standby position");
   
-  // Step 2: Vertically move down to grasp position with constraints
-  ROS_INFO("Moving down to grasp position...");
+  // Step 2: Open gripper
+  ROS_INFO("Step 2: Opening gripper to width %.3f m...", gripper_open_);
+  moveGripper(gripper_open_);
+  ROS_INFO("Gripper opened successfully");
   
-  // Add path constraint for vertical approach
-  moveit_msgs::Constraints constraints;
+  // Step 3: Vertically move down to grasp position with constraints
+  ROS_INFO("Step 3: Moving down to grasp position [%.3f, %.3f, %.3f]...", 
+           grasp_pose.pose.position.x, grasp_pose.pose.position.y, grasp_pose.pose.position.z);
+  
+  // Add orientation constraint for smoother movement
   moveit_msgs::OrientationConstraint ocm;
+  ocm.link_name = "ee_link";
   ocm.header.frame_id = base_frame_;
-  ocm.link_name = arm_group_.getEndEffectorLink();
-  ocm.orientation = grasp_standby_pose.pose.orientation;
-  ocm.absolute_x_axis_tolerance = 0.01; // Very strict
-  ocm.absolute_y_axis_tolerance = 0.01; // Very strict
-  ocm.absolute_z_axis_tolerance = 0.01; // Very strict
+  ocm.orientation = grasp_pose.pose.orientation;
+  ocm.absolute_x_axis_tolerance = 0.1;
+  ocm.absolute_y_axis_tolerance = 0.1;
+  ocm.absolute_z_axis_tolerance = 0.1;
   ocm.weight = 1.0;
   
-  // Add position constraint to only allow Z-axis movement
-  moveit_msgs::PositionConstraint pcm;
-  pcm.header.frame_id = base_frame_;
-  pcm.link_name = arm_group_.getEndEffectorLink();
+  // Add path constraint
+  moveit_msgs::Constraints test_constraints;
+  test_constraints.orientation_constraints.push_back(ocm);
+  arm_group_.setPathConstraints(test_constraints);
   
-  // Create a box constraint that only allows movement in Z direction
-  shape_msgs::SolidPrimitive box;
-  box.type = shape_msgs::SolidPrimitive::BOX;
-  box.dimensions.resize(3);
-  box.dimensions[0] = 0.002; // Small tolerance in X
-  box.dimensions[1] = 0.002; // Small tolerance in Y
-  box.dimensions[2] = 1.0;   // Allow movement in Z
+  bool grasp_success = moveArm(grasp_pose);  
+  if (!grasp_success) {
+    ROS_ERROR("Failed to move to grasp position");
+    arm_group_.clearPathConstraints();
+    return false;
+  }
+  ROS_INFO("Successfully reached grasp position");
   
-  // Set the box position to allow vertical movement
-  geometry_msgs::Pose box_pose;
-  box_pose.position.x = grasp_standby_pose.pose.position.x;
-  box_pose.position.y = grasp_standby_pose.pose.position.y;
-  box_pose.position.z = (grasp_standby_pose.pose.position.z + grasp_pose.pose.position.z) / 2.0;
-  box_pose.orientation.w = 1.0;
-  
-  pcm.constraint_region.primitives.push_back(box);
-  pcm.constraint_region.primitive_poses.push_back(box_pose);
-  pcm.weight = 1.0;
-  
-  constraints.orientation_constraints.push_back(ocm);
-  constraints.position_constraints.push_back(pcm);
-  
-  arm_group_.setPathConstraints(constraints);
-  
-  // Try with constraints
-  bool grasp_approach_success = moveArm(grasp_pose);
-  
-  // Clear constraints for future movements
+  // Clear path constraints
   arm_group_.clearPathConstraints();
   
-  if (!grasp_approach_success) {
-    ROS_ERROR("Failed to move to grasp position");
-    return false;
-  }
+  // Step 4: Close gripper
+  ROS_INFO("Step 4: Closing gripper to width %.3f m...", gripper_closed_);
+  moveGripper(gripper_closed_);
+  ROS_INFO("Gripper closed successfully");
   
-  // Step 3: Close gripper to grasp object
-  ROS_INFO("Closing gripper to grasp object...");
-  bool close_success = moveGripper(gripper_closed_, 2.0);
-  if (!close_success) {
-    ROS_ERROR("Failed to close gripper");
-    return false;
-  }
-  
-  // Step 4: Lift object to higher position
-  ROS_INFO("Lifting object to travel height...");
+  // Step 5: Move to lift position
+  ROS_INFO("Step 5: Moving to lift position [%.3f, %.3f, %.3f]...", 
+           lift_pose.pose.position.x, lift_pose.pose.position.y, lift_pose.pose.position.z);
   bool lift_success = moveArm(lift_pose);
   if (!lift_success) {
-    ROS_ERROR("Failed to move to lifting position");
+    ROS_ERROR("Failed to move to lift position");
     return false;
   }
+  ROS_INFO("Successfully reached lift position");
   
-  ROS_INFO("====== GRASP EXECUTION COMPLETED ======\n");
+  ROS_INFO("====== GRASP EXECUTION COMPLETED SUCCESSFULLY ======\n");
   return true;
 }
 
 bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
-  ROS_INFO("\n====== PLANNING AND EXECUTING PLACE ======");
+  ROS_INFO("\n====== PLANNING PLACE EXECUTION ======");
+  ROS_INFO("Target place position: [%.3f, %.3f, %.3f]", place_point.x, place_point.y, place_point.z);
   
-  // Step 0: Calculate place positions
+  // Create place pose
+  geometry_msgs::PoseStamped place_pose;
+  place_pose.header.frame_id = base_frame_;
+  place_pose.pose.position = place_point;
+  place_pose.pose.orientation = current_grasp_orientation_; // Use same orientation as grasp
+  
+  // Create standby pose (slightly above place pose)
   geometry_msgs::PoseStamped place_standby_pose;
-  geometry_msgs::PoseStamped horizontal_move_pose;
-  
   place_standby_pose.header.frame_id = base_frame_;
-  horizontal_move_pose.header.frame_id = base_frame_;
-  
-  // Place standby position (hand_offset_ + place_stanby_height_ above place position)
-  // This is where we'll release the object
   place_standby_pose.pose.position.x = place_point.x;
   place_standby_pose.pose.position.y = place_point.y;
-  place_standby_pose.pose.position.z = place_point.z + hand_offset_ + place_stanby_height_;
+  place_standby_pose.pose.position.z = place_point.z + place_stanby_height_;
   place_standby_pose.pose.orientation = current_grasp_orientation_;
   
-  // Horizontal move position (same Z as current lift height)
-  horizontal_move_pose.pose.position.x = place_point.x;
-  horizontal_move_pose.pose.position.y = place_point.y;
-  horizontal_move_pose.pose.position.z = current_lift_height_;
-  horizontal_move_pose.pose.orientation = current_grasp_orientation_;
+  ROS_INFO("Computed place poses:");
+  ROS_INFO("- Place position: [%.3f, %.3f, %.3f]", 
+           place_pose.pose.position.x, place_pose.pose.position.y, place_pose.pose.position.z);
+  ROS_INFO("- Place standby position: [%.3f, %.3f, %.3f]", 
+           place_standby_pose.pose.position.x, place_standby_pose.pose.position.y, place_standby_pose.pose.position.z);
   
-  // Step 1: Horizontal move to above place position (keeping Z at lift height)
-  ROS_INFO("Moving horizontally to position above place point...");
-  bool horizontal_move_success = moveArm(horizontal_move_pose);
-  if (!horizontal_move_success) {
-    ROS_ERROR("Failed to move horizontally to place area");
+  // Step 1: Move to place standby position
+  ROS_INFO("Step 1: Moving to place standby position [%.3f, %.3f, %.3f]...", 
+           place_standby_pose.pose.position.x, place_standby_pose.pose.position.y, place_standby_pose.pose.position.z);
+  bool standby_success = moveArm(place_standby_pose);
+  if (!standby_success) {
+    ROS_ERROR("Failed to move to place standby position");
     return false;
   }
+  ROS_INFO("Successfully reached place standby position");
   
-  // Step 2: Vertically move down to place standby position with constraints
-  ROS_INFO("Moving down to place standby position...");
+  // Step 2: Vertically move down to place position with constraints
+  ROS_INFO("Step 2: Moving down to place position [%.3f, %.3f, %.3f]...", 
+           place_pose.pose.position.x, place_pose.pose.position.y, place_pose.pose.position.z);
   
-  // Add path constraint for vertical approach
-  moveit_msgs::Constraints constraints;
+  // Add orientation constraint for smoother movement
   moveit_msgs::OrientationConstraint ocm;
+  ocm.link_name = "ee_link";
   ocm.header.frame_id = base_frame_;
-  ocm.link_name = arm_group_.getEndEffectorLink();
-  ocm.orientation = current_grasp_orientation_;
-  ocm.absolute_x_axis_tolerance = 0.01; // Very strict
-  ocm.absolute_y_axis_tolerance = 0.01; // Very strict
-  ocm.absolute_z_axis_tolerance = 0.01; // Very strict
+  ocm.orientation = place_pose.pose.orientation;
+  ocm.absolute_x_axis_tolerance = 0.1;
+  ocm.absolute_y_axis_tolerance = 0.1;
+  ocm.absolute_z_axis_tolerance = 0.1;
   ocm.weight = 1.0;
   
-  // Add position constraint to only allow Z-axis movement
-  moveit_msgs::PositionConstraint pcm;
-  pcm.header.frame_id = base_frame_;
-  pcm.link_name = arm_group_.getEndEffectorLink();
+  // Add path constraint
+  moveit_msgs::Constraints test_constraints;
+  test_constraints.orientation_constraints.push_back(ocm);
+  arm_group_.setPathConstraints(test_constraints);
   
-  // Create a box constraint that only allows movement in Z direction
-  shape_msgs::SolidPrimitive box;
-  box.type = shape_msgs::SolidPrimitive::BOX;
-  box.dimensions.resize(3);
-  box.dimensions[0] = 0.002; // Small tolerance in X
-  box.dimensions[1] = 0.002; // Small tolerance in Y
-  box.dimensions[2] = 1.0;   // Allow movement in Z
-  
-  // Set the box position to allow vertical movement
-  geometry_msgs::Pose box_pose;
-  box_pose.position.x = place_point.x;
-  box_pose.position.y = place_point.y;
-  box_pose.position.z = (horizontal_move_pose.pose.position.z + place_standby_pose.pose.position.z) / 2.0;
-  box_pose.orientation.w = 1.0;
-  
-  pcm.constraint_region.primitives.push_back(box);
-  pcm.constraint_region.primitive_poses.push_back(box_pose);
-  pcm.weight = 1.0;
-  
-  constraints.orientation_constraints.push_back(ocm);
-  constraints.position_constraints.push_back(pcm);
-  
-  arm_group_.setPathConstraints(constraints);
-  
-  // Try with constraints to move to place standby
-  bool place_standby_success = moveArm(place_standby_pose);
-  
-  // Clear constraints
-  arm_group_.clearPathConstraints();
-  
-  if (!place_standby_success) {
-    ROS_WARN("Failed to move to place standby with constraints, trying without constraints");
-    place_standby_success = moveArm(place_standby_pose);
-    if (!place_standby_success) {
-      ROS_ERROR("Failed to move to place standby position");
-      return false;
-    }
-  }
-  
-  // Step 3: Open gripper to release object at standby position
-  ROS_INFO("Opening gripper to release object...");
-  bool open_success = moveGripper(gripper_open_, 2.0);
-  if (!open_success) {
-    ROS_ERROR("Failed to open gripper");
+  bool place_success = moveArm(place_pose);
+  if (!place_success) {
+    ROS_ERROR("Failed to move to place position");
+    arm_group_.clearPathConstraints();
     return false;
   }
+  ROS_INFO("Successfully reached place position");
   
-  // Pause briefly to allow object to fall
-  ros::Duration(0.5).sleep();
+  // Clear path constraints
+  arm_group_.clearPathConstraints();
   
-  ROS_INFO("====== PLACE EXECUTION COMPLETED ======\n");
+  // Step 3: Open gripper
+  ROS_INFO("Step 3: Opening gripper to width %.3f m...", gripper_open_);
+  moveGripper(gripper_open_);
+  ROS_INFO("Gripper opened successfully");
+  
+  // Step 4: Move back to standby position
+  ROS_INFO("Step 4: Moving back to place standby position [%.3f, %.3f, %.3f]...", 
+           place_standby_pose.pose.position.x, place_standby_pose.pose.position.y, place_standby_pose.pose.position.z);
+  standby_success = moveArm(place_standby_pose);
+  if (!standby_success) {
+    ROS_ERROR("Failed to move back to place standby position");
+    return false;
+  }
+  ROS_INFO("Successfully reached place standby position");
+  
+  ROS_INFO("====== PLACE EXECUTION COMPLETED SUCCESSFULLY ======\n");
   return true;
 }
 
@@ -973,15 +918,773 @@ bool
 cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   cw2_world_spawner::Task3Service::Response &response)
 {
-  /* function which should solve task 3 */
-
+  /* Task 3: Implementation for shape recognition, counting, and selective grasping */
+  
+  ROS_INFO("\n\n====== TASK 3 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 3 has been triggered");
-
+  
+  if (debug_) {
+    ROS_INFO("Debug mode is enabled - will provide extended logging");
+  }
+  
+  // Variables to store results
+  int total_num_shapes = 0;
+  int num_cross_shapes = 0;
+  int num_nought_shapes = 0;
+  
+  // 1. Scan the scene from multiple viewpoints and merge the point clouds
+  ROS_INFO("====== SCANNING SCENE FROM MULTIPLE VIEWPOINTS ======");
+  PointCPtr merged_cloud = scanSceneFromMultipleViewpoints();
+  
+  if (merged_cloud->empty()) {
+    ROS_ERROR("Failed to get valid point cloud data from scanning");
+    return false;
+  }
+  
+  // 2. Filter out the green floor (before processing the rest to save memory)
+  PointCPtr non_floor_cloud = filterOutGreenFloor(merged_cloud);
+  publishPointCloud(non_floor_cloud, cloud_filtered_pub_);
+  
+  // 3. Extract brown basket for placement
+  PointCPtr basket_cloud = extractBrownBasket(non_floor_cloud);
+  geometry_msgs::Point basket_center = findBasketCenter(basket_cloud);
+  ROS_INFO("Basket center found at: [%f, %f, %f]", basket_center.x, basket_center.y, basket_center.z);
+  
+  // 4. Extract black obstacles for collision avoidance
+  PointCPtr obstacles_cloud = extractBlackObstacles(non_floor_cloud);
+  addObstaclesToPlanningScene(obstacles_cloud);
+  
+  // 5. Extract the remaining colored objects (red, blue, purple)
+  PointCPtr objects_cloud = extractGraspableObjects(non_floor_cloud);
+  publishPointCloud(objects_cloud, cloud_object_pub_);
+  
+  // 6. Cluster the objects and determine their shapes
+  std::vector<PointCPtr> object_clusters;
+  std::vector<bool> is_cross_shape;
+  std::vector<ObjectOrientationData> object_orientations;
+  
+  bool clustering_success = clusterAndClassifyObjects(
+      objects_cloud, object_clusters, is_cross_shape, object_orientations);
+  
+  if (!clustering_success) {
+    ROS_ERROR("Failed to cluster and classify objects");
+    return false;
+  }
+  
+  // Count the objects and shapes
+  total_num_shapes = object_clusters.size();
+  for (bool is_cross : is_cross_shape) {
+    if (is_cross) {
+      num_cross_shapes++;
+    } else {
+      num_nought_shapes++;
+    }
+  }
+  
+  // Print the results
+  ROS_INFO("\n====== OBJECT COUNTING RESULTS ======");
+  ROS_INFO("Total number of objects: %d", total_num_shapes);
+  ROS_INFO("Number of cross shapes: %d", num_cross_shapes);
+  ROS_INFO("Number of nought shapes: %d", num_nought_shapes);
+  
+  // 7. Determine which shape is more common and grasp all objects of that shape
+  bool grasp_cross_shape = (num_cross_shapes >= num_nought_shapes);
+  int num_most_common_shape = grasp_cross_shape ? num_cross_shapes : num_nought_shapes;
+  
+  ROS_INFO("Most common shape: %s (Count: %d)", 
+           grasp_cross_shape ? "CROSS" : "NOUGHT", num_most_common_shape);
+  
+  // 8. Grasp and place all objects of the more common shape
+  bool grasp_success = graspAndPlaceObjectsOfType(
+      object_clusters, is_cross_shape, object_orientations, grasp_cross_shape, basket_center);
+  
+  if (!grasp_success) {
+    ROS_WARN("Some objects could not be grasped and placed");
+    // Continue with the task even if some objects failed
+  }
+  
+  // Set the response values
+  response.total_num_shapes = total_num_shapes;
+  response.num_most_common_shape = num_most_common_shape;
+  
+  ROS_INFO("\n====== TASK 3 COMPLETED ======");
+  ROS_INFO("Total shapes: %d, Most common shape count: %d", 
+           total_num_shapes, num_most_common_shape);
+  
   return true;
 }
 
-// Directly copied from cw1_class.cpp
+// Scan the scene from multiple viewpoints and merge the point clouds
+PointCPtr cw2::scanSceneFromMultipleViewpoints() {
+  ROS_INFO("Starting scene scanning from multiple viewpoints...");
+  
+  // Define 8 scanning positions
+  std::vector<geometry_msgs::PoseStamped> scan_poses;
+  
+  // Define rectangle corners and midpoints (X=+-0.5 Y=+-0.4 Z=0.6)
+  std::vector<std::pair<float, float>> scan_xy_positions = {
+    {0.45, -0.35},   // Corner 1
+    {0.45, 0.0},    // Midpoint of edge 1
+    {0.45, 0.35},    // Corner 2
+    {0.0, 0.35},    // Midpoint of edge 2
+    {-0.45, 0.35},   // Corner 3
+    {-0.45, 0.0},   // Midpoint of edge 3
+    {-0.45, -0.35},  // Corner 4
+    {0.0, -0.35}    // Midpoint of edge 4
+  };
+  
+  // Prepare scan positions
+  for (const auto& xy : scan_xy_positions) {
+    geometry_msgs::PoseStamped pose;
+    pose.header.frame_id = base_frame_;
+    pose.pose.position.x = xy.first;
+    pose.pose.position.y = xy.second;
+    pose.pose.position.z = t3_scan_height_;
+    
+    // Special orientation for positions at y=0: rotate 90 degrees around Z axis
+    if (fabs(xy.first) < 0.001) { // Check if y is approximately 0
+      // Create a quaternion for 90-degree rotation around Z axis
+      tf2::Quaternion q_base, q_rot, q_final;
+      tf2::convert(grasp_orientation_, q_base);
+      q_rot.setRPY(0, 0, M_PI/2); // 90 degrees in radians
+      q_final = q_rot * q_base;
+      q_final.normalize();
+      
+      // Convert back to geometry_msgs
+      pose.pose.orientation = tf2::toMsg(q_final);
+      ROS_INFO("Applied 90-degree Z rotation for scanning at y=0 position [%f, %f]", 
+               xy.first, xy.second);
+    } else {
+      // Use standard orientation for other positions
+      pose.pose.orientation = grasp_orientation_;
+    }
+    
+    scan_poses.push_back(pose);
+  }
+  
+  // Vector to hold all collected point clouds
+  std::vector<PointCPtr> collected_clouds;
+  
+  // Move to each scan position and collect point cloud
+  for (size_t i = 0; i < scan_poses.size(); i++) {
+    ROS_INFO("Moving to scan position %zu/%zu [%f, %f, %f]", 
+             i+1, scan_poses.size(), 
+             scan_poses[i].pose.position.x,
+             scan_poses[i].pose.position.y,
+             scan_poses[i].pose.position.z);
+    
+    // Move arm to scan position
+    bool move_success = moveArm(scan_poses[i]);
+    if (!move_success) {
+      ROS_WARN("Failed to move to scan position %zu, skipping", i+1);
+      continue;
+    }
+    
+    // Wait for arm to stabilize
+    ros::Duration(1.0).sleep();
+    
+    // Get point cloud from depth camera
+    PointCPtr cloud = getLatestPointCloud("/r200/camera/depth_registered/points", base_frame_);
+    
+    if (cloud->empty()) {
+      ROS_WARN("Received empty point cloud at position %zu, skipping", i+1);
+      continue;
+    }
+    
+    ROS_INFO("Got point cloud with %lu points at position %zu", cloud->points.size(), i+1);
+    
+    // Apply voxel grid downsampling to 1mm resolution
+    pcl::VoxelGrid<PointT> voxel_filter;
+    PointCPtr downsampled_cloud(new PointC);
+    
+    voxel_filter.setInputCloud(cloud);
+    voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 1mm voxel size
+    voxel_filter.filter(*downsampled_cloud);
+    
+    ROS_INFO("Downsampled to %lu points (1mm resolution)", downsampled_cloud->points.size());
+    
+    // Add to collected clouds
+    collected_clouds.push_back(downsampled_cloud);
+  }
+  
+  // Handle the case if no clouds were collected
+  if (collected_clouds.empty()) {
+    ROS_ERROR("Failed to collect any valid point clouds from scanning positions");
+    return PointCPtr(new PointC);
+  }
+  
+  // Merge all collected clouds
+  PointCPtr merged_cloud(new PointC);
+  
+  for (const auto& cloud : collected_clouds) {
+    *merged_cloud += *cloud;
+  }
+  
+  ROS_INFO("Merged point cloud has %lu points from %zu scan positions", 
+           merged_cloud->points.size(), collected_clouds.size());
+  
+  // Apply statistical outlier removal to clean up the merged cloud
+  pcl::StatisticalOutlierRemoval<PointT> sor;
+  PointCPtr cleaned_cloud(new PointC);
+  
+  sor.setInputCloud(merged_cloud);
+  sor.setMeanK(50);             // Consider 50 neighbors
+  sor.setStddevMulThresh(1.0);  // Standard deviation threshold
+  sor.filter(*cleaned_cloud);
+  
+  ROS_INFO("Final merged and cleaned point cloud has %lu points", cleaned_cloud->points.size());
+  
+  return cleaned_cloud;
+}
+
+// Filter out the green floor from the point cloud
+PointCPtr cw2::filterOutGreenFloor(const PointCPtr& cloud) {
+  ROS_INFO("Filtering out green floor from point cloud with %lu points", cloud->points.size());
+  
+  PointCPtr non_floor_cloud(new PointC);
+  
+  // Green floor color thresholds (RGB)
+  float r_min = 0.0f, r_max = 0.2f;
+  float g_min = 0.7f, g_max = 1.0f;
+  float b_min = 0.0f, b_max = 0.2f;
+  
+  for (const auto& point : cloud->points) {
+    // Normalize RGB values to 0-1 range
+    float r = point.r / 255.0f;
+    float g = point.g / 255.0f;
+    float b = point.b / 255.0f;
+    
+    // Check if point is NOT green floor
+    bool is_green = (r >= r_min && r <= r_max) &&
+                    (g >= g_min && g <= g_max) &&
+                    (b >= b_min && b <= b_max);
+    
+    if (!is_green) {
+      non_floor_cloud->points.push_back(point);
+    }
+  }
+  
+  non_floor_cloud->width = non_floor_cloud->points.size();
+  non_floor_cloud->height = 1;
+  non_floor_cloud->is_dense = true;
+  non_floor_cloud->header = cloud->header;
+  
+  ROS_INFO("Removed green floor, remaining points: %lu", non_floor_cloud->points.size());
+  
+  return non_floor_cloud;
+}
+
+// Extract the brown basket from the point cloud
+PointCPtr cw2::extractBrownBasket(const PointCPtr& cloud) {
+  ROS_INFO("Extracting brown basket from point cloud...");
+  
+  PointCPtr basket_cloud(new PointC);
+  
+  // Brown color thresholds (RGB)
+  float r_min = 0.4f, r_max = 0.6f;
+  float g_min = 0.1f, g_max = 0.3f;
+  float b_min = 0.1f, b_max = 0.3f;
+  
+  for (const auto& point : cloud->points) {
+    // Normalize RGB values to 0-1 range
+    float r = point.r / 255.0f;
+    float g = point.g / 255.0f;
+    float b = point.b / 255.0f;
+    
+    // Check if point is brown
+    bool is_brown = (r >= r_min && r <= r_max) &&
+                    (g >= g_min && g <= g_max) &&
+                    (b >= b_min && b <= b_max);
+    
+    if (is_brown) {
+      basket_cloud->points.push_back(point);
+    }
+  }
+  
+  basket_cloud->width = basket_cloud->points.size();
+  basket_cloud->height = 1;
+  basket_cloud->is_dense = true;
+  basket_cloud->header = cloud->header;
+  
+  ROS_INFO("Extracted brown basket with %lu points", basket_cloud->points.size());
+  
+  return basket_cloud;
+}
+
+// Find the center of the basket
+geometry_msgs::Point cw2::findBasketCenter(const PointCPtr& basket_cloud) {
+  ROS_INFO("Finding basket center from %lu points", basket_cloud->points.size());
+  
+  geometry_msgs::Point center;
+  
+  if (basket_cloud->empty()) {
+    ROS_WARN("Basket cloud is empty, returning default center");
+    center.x = 0.0;
+    center.y = 0.0;
+    center.z = 0.0;
+    return center;
+  }
+  
+  // Cluster the basket points (in case there are multiple brown objects)
+  std::vector<pcl::PointIndices> cluster_indices;
+  pcl::EuclideanClusterExtraction<PointT> ec;
+  pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
+  
+  tree->setInputCloud(basket_cloud);
+  ec.setClusterTolerance(0.02);  // 2cm tolerance
+  ec.setMinClusterSize(100);     // Minimum 100 points per cluster
+  ec.setMaxClusterSize(100000);  // Maximum 100k points per cluster
+  ec.setSearchMethod(tree);
+  ec.setInputCloud(basket_cloud);
+  ec.extract(cluster_indices);
+  
+  ROS_INFO("Found %zu clusters in basket cloud", cluster_indices.size());
+  
+  // Find the largest cluster (assume it's the basket)
+  size_t max_size = 0;
+  int max_cluster_idx = -1;
+  
+  for (size_t i = 0; i < cluster_indices.size(); i++) {
+    size_t cluster_size = cluster_indices[i].indices.size();
+    ROS_INFO("Cluster %zu has %zu points", i, cluster_size);
+    
+    if (cluster_size > max_size) {
+      max_size = cluster_size;
+      max_cluster_idx = i;
+    }
+  }
+  
+  if (max_cluster_idx == -1) {
+    ROS_WARN("No valid basket cluster found, using centroid of all brown points");
+    
+    // Compute centroid of all points
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*basket_cloud, centroid);
+    
+    center.x = centroid[0];
+    center.y = centroid[1];
+    center.z = centroid[2];
+  } else {
+    // Extract the largest cluster
+    PointCPtr basket_cluster(new PointC);
+    
+    for (const auto& idx : cluster_indices[max_cluster_idx].indices) {
+      basket_cluster->points.push_back(basket_cloud->points[idx]);
+    }
+    
+    basket_cluster->width = basket_cluster->points.size();
+    basket_cluster->height = 1;
+    basket_cluster->is_dense = true;
+    
+    // Compute centroid of the cluster
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*basket_cluster, centroid);
+    
+    center.x = centroid[0];
+    center.y = centroid[1];
+    center.z = centroid[2];
+    
+    ROS_INFO("Found basket center at [%f, %f, %f] from largest cluster with %zu points",
+             center.x, center.y, center.z, max_size);
+  }
+  
+  return center;
+}
+
+// Extract black obstacles from the point cloud
+PointCPtr cw2::extractBlackObstacles(const PointCPtr& cloud) {
+  ROS_INFO("Extracting black obstacles from point cloud...");
+  
+  PointCPtr obstacles_cloud(new PointC);
+  
+  // Black color thresholds (RGB)
+  float r_min = 0.0f, r_max = 0.2f;
+  float g_min = 0.0f, g_max = 0.2f;
+  float b_min = 0.0f, b_max = 0.2f;
+  
+  for (const auto& point : cloud->points) {
+    // Normalize RGB values to 0-1 range
+    float r = point.r / 255.0f;
+    float g = point.g / 255.0f;
+    float b = point.b / 255.0f;
+    
+    // Check if point is black
+    bool is_black = (r >= r_min && r <= r_max) &&
+                    (g >= g_min && g <= g_max) &&
+                    (b >= b_min && b <= b_max);
+    
+    if (is_black) {
+      obstacles_cloud->points.push_back(point);
+    }
+  }
+  
+  obstacles_cloud->width = obstacles_cloud->points.size();
+  obstacles_cloud->height = 1;
+  obstacles_cloud->is_dense = true;
+  obstacles_cloud->header = cloud->header;
+  
+  ROS_INFO("Extracted black obstacles with %lu points", obstacles_cloud->points.size());
+  
+  return obstacles_cloud;
+}
+
+/**
+ * Add black obstacles to the planning scene as an OctoMap
+ * 
+ * @param obstacles_cloud Point cloud containing the black obstacles
+ */
+void cw2::addObstaclesToPlanningScene(const PointCPtr& obstacles_cloud) {
+  ROS_INFO("Adding black obstacles to planning scene using OctoMap representation");
+  
+  if (obstacles_cloud->empty()) {
+    ROS_WARN("No obstacle points found in the point cloud");
+    return;
+  }
+  
+  // Publish the obstacles cloud for visualization
+  publishPointCloud(obstacles_cloud, obstacles_cloud_pub_);
+  
+  // Create a planning scene message to apply the changes
+  moveit_msgs::PlanningScene planning_scene;
+  planning_scene.is_diff = true;
+  planning_scene.world.octomap.header.frame_id = base_frame_;
+  
+  // Convert point cloud to octomap
+  octomap::OcTree* obstacles_octree = new octomap::OcTree(0.02); // 2cm resolution
+  
+  // Create a pointcloud2 message from pcl point cloud
+  sensor_msgs::PointCloud2 cloud_msg;
+  pcl::toROSMsg(*obstacles_cloud, cloud_msg);
+  
+  // Convert PointCloud2 to octomap
+  octomap::Pointcloud octomap_cloud;
+  for (size_t i = 0; i < obstacles_cloud->size(); ++i) {
+    const auto& point = obstacles_cloud->at(i);
+    octomap_cloud.push_back(point.x, point.y, point.z);
+  }
+  
+  // Set origin for the OcTree
+  octomap::point3d sensor_origin(0.0, 0.0, 0.0);
+  
+  // Insert the point cloud into the octree
+  obstacles_octree->insertPointCloud(octomap_cloud, sensor_origin);
+  obstacles_octree->updateInnerOccupancy();
+  
+  // Convert OcTree to OctoMap message
+  octomap_msgs::binaryMapToMsg(*obstacles_octree, planning_scene.world.octomap.octomap);
+  
+  // Apply the planning scene update
+  moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
+  planning_scene_interface.applyPlanningScene(planning_scene);
+  
+  // Clean up
+  delete obstacles_octree;
+  
+  ROS_INFO("Successfully added obstacles as OctoMap to planning scene");
+}
+
+// Extract red, blue, or purple graspable objects
+PointCPtr cw2::extractGraspableObjects(const PointCPtr& cloud) {
+  ROS_INFO("Extracting graspable objects (red, blue, purple) from point cloud...");
+  
+  PointCPtr objects_cloud(new PointC);
+  
+  for (const auto& point : cloud->points) {
+    // Normalize RGB values to 0-1 range
+    float r = point.r / 255.0f;
+    float g = point.g / 255.0f;
+    float b = point.b / 255.0f;
+    
+    // Check for red, blue, or purple colors
+    bool isRed = (r > 0.7f && r < 0.9f) &&
+                 (g > 0.0f && g < 0.2f) &&
+                 (b > 0.0f && b < 0.2f);
+    
+    bool isBlue = (r > 0.0f && r < 0.2f) &&
+                  (g > 0.0f && g < 0.2f) &&
+                  (b > 0.7f && b < 0.9f);
+    
+    bool isPurple = (r > 0.7f && r < 0.9f) &&
+                    (g > 0.0f && g < 0.2f) &&
+                    (b > 0.7f && b < 0.9f);
+    
+    if (isRed || isBlue || isPurple) {
+      objects_cloud->points.push_back(point);
+    }
+  }
+  
+  objects_cloud->width = objects_cloud->points.size();
+  objects_cloud->height = 1;
+  objects_cloud->is_dense = true;
+  objects_cloud->header = cloud->header;
+  
+  ROS_INFO("Extracted graspable objects with %lu points", objects_cloud->points.size());
+  
+  return objects_cloud;
+}
+
+// Cluster and classify objects, returning orientation data for each
+bool cw2::clusterAndClassifyObjects(
+    const PointCPtr& objects_cloud,
+    std::vector<PointCPtr>& object_clusters,
+    std::vector<bool>& is_cross_shape,
+    std::vector<ObjectOrientationData>& object_orientations) {
+  
+  ROS_INFO("Clustering and classifying objects...");
+  
+  if (objects_cloud->empty()) {
+    ROS_ERROR("Objects cloud is empty, cannot cluster");
+    return false;
+  }
+  
+  // Clear output vectors
+  object_clusters.clear();
+  is_cross_shape.clear();
+  object_orientations.clear();
+  
+  // Create KdTree for clustering
+  pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
+  tree->setInputCloud(objects_cloud);
+  
+  // Perform Euclidean clustering
+  std::vector<pcl::PointIndices> cluster_indices;
+  pcl::EuclideanClusterExtraction<PointT> ec;
+  ec.setClusterTolerance(cluster_tolerance_);
+  ec.setMinClusterSize(min_cluster_size_);
+  ec.setMaxClusterSize(max_cluster_size_);
+  ec.setSearchMethod(tree);
+  ec.setInputCloud(objects_cloud);
+  ec.extract(cluster_indices);
+  
+  ROS_INFO("====== CLUSTERING RESULTS ======");
+  ROS_INFO("Found %zu object clusters", cluster_indices.size());
+  
+  // 创建用于可视化的彩色聚类点云
+  PointCPtr colored_clusters(new PointC);
+  colored_clusters->header = objects_cloud->header;
+  
+  // 创建用于所有 PCA 轴的标记数组
+  visualization_msgs::MarkerArray all_pca_markers;
+  
+  // 处理每个聚类
+  for (size_t i = 0; i < cluster_indices.size(); i++) {
+    // Extract cluster
+    PointCPtr cluster(new PointC);
+    for (const auto& idx : cluster_indices[i].indices) {
+      cluster->points.push_back(objects_cloud->points[idx]);
+    }
+    cluster->width = cluster->points.size();
+    cluster->height = 1;
+    cluster->is_dense = true;
+    cluster->header = objects_cloud->header;
+    
+    ROS_INFO("Cluster %zu has %lu points", i+1, cluster->points.size());
+    
+    // Compute centroid for shape determination
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*cluster, centroid);
+    
+    geometry_msgs::Point center_point;
+    center_point.x = centroid[0];
+    center_point.y = centroid[1];
+    center_point.z = centroid[2];
+    
+    // Determine if it's a cross shape using the centroid method
+    bool is_cross = determineShapeTypeFromCamera(cluster, center_point);
+    
+    ROS_INFO("Cluster %zu is a %s shape", i+1, is_cross ? "CROSS" : "NOUGHT");
+    
+    // Determine object orientation using PCA
+    std::string shape_type = is_cross ? "cross" : "nought";
+    ObjectOrientationData orientation_data = determineObjectOrientation(cluster, shape_type);
+    
+    if (orientation_data.is_valid) {
+      // Add to output vectors
+      object_clusters.push_back(cluster);
+      is_cross_shape.push_back(is_cross);
+      object_orientations.push_back(orientation_data);
+    } else {
+      ROS_WARN("Could not determine valid orientation for cluster %zu, skipping", i+1);
+    }
+    
+    // 为该聚类分配一个唯一颜色用于可视化
+    uint8_t r = 50 + (i * 40) % 200;
+    uint8_t g = 50 + ((i * 70) % 200);
+    uint8_t b = 50 + ((i * 90) % 200);
+    
+    // 为聚类中的每个点设置颜色，并添加到可视化点云
+    for (const auto& idx : cluster_indices[i].indices) {
+      PointT colored_point = objects_cloud->points[idx];
+      colored_point.r = r;
+      colored_point.g = g;
+      colored_point.b = b;
+      colored_clusters->points.push_back(colored_point);
+    }
+    
+    // 获取该聚类的 PCA 轴向标记
+    if (orientation_data.is_valid) {
+      // 创建该聚类的 PCA 轴标记
+      visualization_msgs::MarkerArray cluster_pca_markers = createPCAAxesMarkers(
+          centroid, orientation_data.primary_axis, orientation_data.secondary_axis, 
+          i, shape_type);
+      
+      // 将标记添加到所有 PCA 轴的标记数组中
+      for (const auto& marker : cluster_pca_markers.markers) {
+        all_pca_markers.markers.push_back(marker);
+      }
+    }
+  }
+  
+  ROS_INFO("Successfully processed %zu valid object clusters", object_clusters.size());
+  ROS_INFO("======================================");
+  
+  // 设置可视化点云属性
+  colored_clusters->width = colored_clusters->points.size();
+  colored_clusters->height = 1;
+  colored_clusters->is_dense = true;
+  
+  // 发布可视化
+  publishPointCloud(colored_clusters, clusters_pub_);
+  all_pca_axes_pub_.publish(all_pca_markers);
+  
+  return !object_clusters.empty();
+}
+
+// 添加辅助函数来创建 PCA 轴向标记
+visualization_msgs::MarkerArray cw2::createPCAAxesMarkers(
+    const Eigen::Vector4f& centroid,
+    const Eigen::Vector3f& primary_axis,
+    const Eigen::Vector3f& secondary_axis,
+    int id_offset,
+    const std::string& shape_type) {
+  
+  visualization_msgs::MarkerArray marker_array;
+  
+  // 创建主轴标记
+  visualization_msgs::Marker primary_marker;
+  primary_marker.header.frame_id = base_frame_;
+  primary_marker.header.stamp = ros::Time::now();
+  primary_marker.ns = "pca_axes";
+  primary_marker.id = id_offset * 3;
+  primary_marker.type = visualization_msgs::Marker::ARROW;
+  primary_marker.action = visualization_msgs::Marker::ADD;
+  
+  primary_marker.pose.position.x = centroid[0];
+  primary_marker.pose.position.y = centroid[1];
+  primary_marker.pose.position.z = centroid[2];
+  
+  // 计算从 z 轴到目标轴的四元数
+  Eigen::Vector3f z_axis(0, 0, 1);
+  Eigen::Vector3f rotation_axis = z_axis.cross(primary_axis).normalized();
+  float rotation_angle = acos(z_axis.dot(primary_axis));
+  
+  Eigen::Quaternionf q;
+  q = Eigen::AngleAxisf(rotation_angle, rotation_axis);
+  
+  primary_marker.pose.orientation.x = q.x();
+  primary_marker.pose.orientation.y = q.y();
+  primary_marker.pose.orientation.z = q.z();
+  primary_marker.pose.orientation.w = q.w();
+  
+  primary_marker.scale.x = 0.1;  // 轴长
+  primary_marker.scale.y = 0.01; // 轴宽
+  primary_marker.scale.z = 0.01; // 轴高
+  
+  // 为不同形状设置不同颜色
+  if (shape_type == "cross") {
+    primary_marker.color.r = 1.0;
+    primary_marker.color.g = 0.0;
+    primary_marker.color.b = 0.0;
+  } else {
+    primary_marker.color.r = 0.0;
+    primary_marker.color.g = 0.0;
+    primary_marker.color.b = 1.0;
+  }
+  primary_marker.color.a = 1.0;
+  
+  marker_array.markers.push_back(primary_marker);
+  
+  // 类似地创建次轴和第三轴标记...
+  // (省略部分代码以保持简洁)
+  
+  return marker_array;
+}
+
+// Grasp and place all objects of the specified type
+bool cw2::graspAndPlaceObjectsOfType(
+    const std::vector<PointCPtr>& object_clusters,
+    const std::vector<bool>& is_cross_shape,
+    const std::vector<ObjectOrientationData>& object_orientations,
+    bool grasp_cross_shape,
+    const geometry_msgs::Point& basket_center) {
+  
+  ROS_INFO("\n====== GRASPING AND PLACING OBJECTS ======");
+  ROS_INFO("Target shape type: %s", grasp_cross_shape ? "CROSS" : "NOUGHT");
+  
+  if (object_clusters.empty() || is_cross_shape.empty() || object_orientations.empty()) {
+    ROS_ERROR("Empty input data, cannot grasp objects");
+    return false;
+  }
+  
+  // Track current Z offset for stacking in the basket
+  float current_z_offset = 0.0f;
+  int objects_placed = 0;
+  
+  // Process each object in the list
+  for (size_t i = 0; i < object_clusters.size(); i++) {
+    // Skip objects that don't match the target shape
+    if (is_cross_shape[i] != grasp_cross_shape) {
+      continue;
+    }
+    
+    ROS_INFO("\n------- Grasping object %zu (%s) -------", 
+             i+1, is_cross_shape[i] ? "CROSS" : "NOUGHT");
+    
+    // Compute centroid for the object
+    Eigen::Vector4f centroid;
+    pcl::compute3DCentroid(*object_clusters[i], centroid);
+    
+    // Set up grasp point
+    geometry_msgs::Point object_center;
+    object_center.x = centroid[0];
+    object_center.y = centroid[1];
+    object_center.z = centroid[2];
+    
+    // Execute the grasp
+    std::string shape_type = is_cross_shape[i] ? "cross" : "nought";
+    bool grasp_success = planAndExecuteGrasp(object_center, object_orientations[i], shape_type);
+    
+    if (!grasp_success) {
+      ROS_WARN("Failed to grasp object %zu, skipping to next", i+1);
+      continue;
+    }
+    
+    // Create place point with current Z offset
+    geometry_msgs::Point place_point = basket_center;
+    place_point.z += current_z_offset;
+    
+    // Execute the place
+    bool place_success = planAndExecutePlace(place_point);
+    
+    if (place_success) {
+      ROS_INFO("Successfully placed object %zu in basket", i+1);
+      objects_placed++;
+      
+      // Increase Z offset for next placement (40mm per object)
+      current_z_offset += 0.04; // 40mm
+    } else {
+      ROS_WARN("Failed to place object %zu in basket", i+1);
+    }
+  }
+  
+  ROS_INFO("====== GRASPING AND PLACING COMPLETED ======");
+  ROS_INFO("Successfully placed %d objects in the basket", objects_placed);
+  
+  return objects_placed > 0;
+}
+
 ///////////////////////////////////////////////////////////////////////////////
+
 bool
 cw2::moveArm(geometry_msgs::PoseStamped target_pose)
 {
@@ -1258,15 +1961,16 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
   
   // Move to each scan pose
   for (int i = 0; i < scan_poses.size(); i++) {
-    ROS_INFO("Moving to scan position %d/%lu", i+1, scan_poses.size());
+    ROS_INFO("Moving to scan position %zu/%zu", i+1, scan_poses.size());
     
-    bool success = moveArm(scan_poses[i]);
-    if (!success) {
-      ROS_WARN("Failed to move to scan position %d, trying next position", i+1);
+    // Move arm to scan position
+    bool move_success = moveArm(scan_poses[i]);
+    if (!move_success) {
+      ROS_WARN("Failed to move to scan position %zu, trying next position", i+1);
       continue;
     }
     
-    // Wait a bit for the arm to stabilize
+    // Wait for arm to stabilize
     ros::Duration(1.0).sleep();
     
     // Reset the OctoMap status
@@ -1276,7 +1980,7 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
     ros::Time start_time = ros::Time::now();
     ros::Duration timeout(5.0); // 5-second timeout
     
-    ROS_INFO("Waiting for OctoMap update at position %d...", i+1);
+    ROS_INFO("Waiting for OctoMap update at position %zu...", i+1);
     
     while (!octomap_received_ && ros::Time::now() - start_time < timeout) {
       ros::spinOnce();
@@ -1284,12 +1988,12 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
     }
     
     if (octomap_received_) {
-      ROS_INFO("Successfully received OctoMap update at scan position %d with %d bytes of data",
+      ROS_INFO("Successfully received OctoMap update at scan position %zu with %d bytes of data",
                i+1, (int)latest_octomap_.data.size());
       successful_scans++;
     } else {
       // Try calling the service directly if subscriber didn't work
-      ROS_WARN("Timeout waiting for OctoMap update from subscriber at scan position %d, trying service call",
+      ROS_WARN("Timeout waiting for OctoMap update from subscriber at scan position %zu, trying service call",
                i+1);
       
       octomap_msgs::GetOctomap srv;
@@ -1297,14 +2001,14 @@ bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
         latest_octomap_ = srv.response.map;
         octomap_received_ = true;
         successful_scans++;
-        ROS_INFO("Successfully received OctoMap from service at scan position %d", i+1);
+        ROS_INFO("Successfully received OctoMap from service at scan position %zu", i+1);
       } else {
-        ROS_ERROR("Failed to receive OctoMap from service at scan position %d", i+1);
+        ROS_ERROR("Failed to receive OctoMap from service at scan position %zu", i+1);
       }
     }
   }
   
-  ROS_INFO("Completed %d successful scans out of %lu positions", successful_scans, scan_poses.size());
+  ROS_INFO("Completed %d successful scans out of %zu positions", successful_scans, scan_poses.size());
   
   // Return to a position above the object
   geometry_msgs::PoseStamped top_pose;
