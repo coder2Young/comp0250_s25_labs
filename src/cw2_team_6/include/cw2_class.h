@@ -241,7 +241,8 @@ public:
   bool planAndExecuteGrasp(
       const geometry_msgs::Point &object_point,
       const ObjectOrientationData &orientation_data,
-      const std::string &shape_type);
+      const std::string &shape_type,
+      float offset_override = -1.0);
   bool planAndExecutePlace(const geometry_msgs::Point &goal_point);
   
   // Debug visualization methods
@@ -302,6 +303,8 @@ public:
       const Eigen::Vector4f& centroid,
       bool is_cross,
       const ObjectOrientationData& orientation);
+
+
 
 private:
   // Euclidean clustering parameters
@@ -375,6 +378,10 @@ private:
 
   // Point cloud subscriber - always active
   ros::Subscriber cloud_sub_;
+
+  float 
+  calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& centroid, 
+                           const Eigen::Vector3f& grasp_axis, bool is_cross);
 };
 
 #endif // end of include guard for cw2_CLASS_H_
