@@ -12,7 +12,7 @@ cw2::cw2(ros::NodeHandle nh):
   tf_listener_(tf_buffer_),
   collision_object_vector_(),
   arm_group_("panda_arm"),
-  hand_group_("hand")
+  hand_group_("hand") // Not config, just instantiate
 {
   /* class constructor */
   nh_ = nh;
@@ -55,14 +55,14 @@ cw2::cw2(ros::NodeHandle nh):
   return;
 }
 
+/* function to configure the robot for the coursework */
 void
 cw2::cw2_config()
 {
-  /* function to configure the robot for the coursework */
   ROS_INFO("Configuring the robot for the coursework");
 
   // Enable debug mode
-  debug_ = false;
+  debug_ = true;
   if (debug_){
     ROS_INFO("Debug mode enabled");
   }
@@ -75,6 +75,7 @@ cw2::cw2_config()
   place_stanby_height_ = 0.1;
   pick_lift_offset_ = 0.4; // 40cm higher position for lifting objects
   
+  // Default grasp_orientaion, heading down by roll:-M_PI
   tf2::Quaternion q_grasp;
   q_grasp.setRPY(-M_PI, 0, -M_PI/4);
   grasp_orientation_ = tf2::toMsg(q_grasp);
@@ -90,16 +91,17 @@ cw2::cw2_config()
 
   /* Task3 */
   t3_scan_height_ = 0.65;           // Height for scanning the entire scene, as hight as possible for avoiding obstacles
-  t3_grasp_height_offset_ = -0.08;    // Add 10cm to Z coordinate of all grasp points to compensate for low point cloud values
+  t3_grasp_height_offset_ = -0.06;    // Add 6cm to Z coordinate of all grasp points to compensate for low point cloud values
 
   // Continuous scanning parameters
   t3_pointcloud_save_interval_ = 10;     // Process every 10th frame
   t3_continuous_scan_voxel_size_ = 0.002; // 2mm voxel size for downsampling
-  t3_merge_voxel_size_ = 0.001;
+  t3_merge_voxel_size_ = 0.001; // 1mm voxel for merged cloud
   
-  t3_noughts_grasp_offset_ = 0.02;
+  t3_cross_grasp_offset_base_ = 0.02;
+  t3_nought_grasp_offset_base_ = 0.02;
   // Euclidean clustering parameters
-  t3_cluster_tolerance_ = 0.001;    // 1mm tolerance between points in cluster
+  t3_cluster_tolerance_ = 0.005;    // 2mm tolerance between points in cluster
   t3_min_cluster_size_ = 500; 
   t3_max_cluster_size_ = 20000;
 
@@ -289,7 +291,7 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
     }
     
     // 4. Determine shape from filtered cloud
-    bool is_cross = determineShapeTypeFromCamera(filtered_cloud, all_objects[i].point);
+    bool is_cross = determineObjectShape(filtered_cloud, all_objects[i].point);
     is_cross_shape.push_back(is_cross);
     
     ROS_INFO("%s is a %s shape", object_name.c_str(), is_cross ? "CROSS" : "NOUGHT");
@@ -350,8 +352,8 @@ cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   int num_nought_shapes = 0;
   
   // 1. Scan the scene from multiple viewpoints and merge the point clouds
-  ROS_INFO("====== SCANNING SCENE FROM MULTIPLE VIEWPOINTS ======");
-  // Use new continuous scanning method instead of the original
+  ROS_INFO("====== SCANNING SCENE  ======");
+
   PointCPtr merged_cloud = continuousScanSceneFromMultipleViewpoints();
   
   if (merged_cloud->empty()) {
@@ -359,20 +361,20 @@ cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
     return false;
   }
   
-  // 3. Extract brown basket for placement
+  // 2. Extract brown basket for placement
   PointCPtr basket_cloud = extractBrownBasket(merged_cloud);
   geometry_msgs::Point basket_center = findBasketCenter(basket_cloud);
   ROS_INFO("Basket center found at: [%f, %f, %f]", basket_center.x, basket_center.y, basket_center.z);
   
-  // 4. Extract black obstacles for collision avoidance
+  // 3. Extract black obstacles for collision avoidance
   PointCPtr obstacles_cloud = extractBlackObstacles(merged_cloud);
   addObstaclesToPlanningScene(obstacles_cloud);
   
-  // 5. Extract the remaining colored objects (red, blue, purple)
+  // 4. Extract the remaining colored objects (red, blue, purple)
   PointCPtr objects_cloud = extractGraspableObjects(merged_cloud);
   publishPointCloud(objects_cloud, cloud_object_pub_);
   
-  // 6. Cluster the objects and determine their shapes
+  // 5. Cluster the objects and determine their shapes
   std::vector<PointCPtr> object_clusters;
   std::vector<bool> is_cross_shape;
   std::vector<ObjectOrientationData> object_orientations;
@@ -401,14 +403,14 @@ cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   ROS_INFO("Number of cross shapes: %d", num_cross_shapes);
   ROS_INFO("Number of nought shapes: %d", num_nought_shapes);
   
-  // 7. Determine which shape is more common and grasp all objects of that shape
+  // 6. Determine which shape is more common and grasp all objects of that shape
   bool grasp_cross_shape = (num_cross_shapes >= num_nought_shapes);
   int num_most_common_shape = grasp_cross_shape ? num_cross_shapes : num_nought_shapes;
   
   ROS_INFO("Most common shape: %s (Count: %d)", 
            grasp_cross_shape ? "CROSS" : "NOUGHT", num_most_common_shape);
   
-  // 8. Grasp and place all objects of the more common shape
+  // 7. Grasp and place all objects of the more common shape
   bool grasp_success = graspAndPlaceObjectsOfType(
       object_clusters, is_cross_shape, object_orientations, grasp_cross_shape, basket_center);
   
@@ -893,7 +895,7 @@ void cw2::publishPointCloud(const PointCPtr &cloud, const ros::Publisher &publis
 
 
 // Modified shape determination to use point cloud centroid instead of message-provided center point
-bool cw2::determineShapeTypeFromCamera(PointCPtr cloud, const geometry_msgs::Point &center_point) {
+bool cw2::determineObjectShape(PointCPtr cloud, const geometry_msgs::Point &center_point) {
   ROS_INFO("\n====== DETERMINING SHAPE TYPE FROM CAMERA ======");
   
   // If cloud is empty, can't make determination
@@ -1051,8 +1053,8 @@ geometry_msgs::Point cw2::findBasketCenter(const PointCPtr& basket_cloud) {
   pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
   
   tree->setInputCloud(basket_cloud);
-  ec.setClusterTolerance(0.02);  // 2cm tolerance
-  ec.setMinClusterSize(100);     // Minimum 100 points per cluster
+  ec.setClusterTolerance(0.05);  // 5cm tolerance
+  ec.setMinClusterSize(500);     // Minimum 100 points per cluster
   ec.setMaxClusterSize(100000);  // Maximum 100k points per cluster
   ec.setSearchMethod(tree);
   ec.setInputCloud(basket_cloud);
@@ -1302,7 +1304,7 @@ bool cw2::clusterAndClassifyObjects(
     center_point.z = centroid[2];
     
     // Determine if it's a cross shape using the centroid method
-    bool is_cross = determineShapeTypeFromCamera(cluster, center_point);
+    bool is_cross = determineObjectShape(cluster, center_point);
     
     ROS_INFO("Cluster %zu is a %s shape", i+1, is_cross ? "CROSS" : "NOUGHT");
     
@@ -1318,10 +1320,10 @@ bool cw2::clusterAndClassifyObjects(
     } else {
       ROS_WARN("Could not determine valid orientation for cluster %zu, skipping", i+1);
     }
-    
-    uint8_t r = 50 + (i * 40) % 200;
-    uint8_t g = 50 + ((i * 70) % 200);
-    uint8_t b = 50 + ((i * 90) % 200);
+  
+    uint8_t r = 50;
+    uint8_t g = 50;
+    uint8_t b = 50;
 
     for (const auto& idx : cluster_indices[i].indices) {
       PointT colored_point = objects_cloud->points[idx];
@@ -1454,32 +1456,27 @@ bool cw2::graspAndPlaceObjectsOfType(
     object_center.z = centroid[2];
     object_center.z += t3_grasp_height_offset_;
     
-    // 计算抓取方向和偏移量
     Eigen::Vector3f grasp_axis;
     if (is_cross_shape[i]) {
-      // 对于十字形，使用主轴方向
+
       grasp_axis = object_orientations[i].primary_axis;
     } else {
-      // 对于圆环形，计算中点角度方向
       float primary_angle = atan2(object_orientations[i].primary_axis[1], 
                                  object_orientations[i].primary_axis[0]);
       float secondary_angle = atan2(object_orientations[i].secondary_axis[1], 
                                    object_orientations[i].secondary_axis[0]);
       
-      // 处理角度差
       float angle_diff = secondary_angle - primary_angle;
       if (angle_diff > M_PI) angle_diff -= 2*M_PI;
       if (angle_diff < -M_PI) angle_diff += 2*M_PI;
       
       float midpoint_angle = primary_angle + angle_diff/2.0;
       
-      // 中点角度方向
       grasp_axis[0] = cos(midpoint_angle);
       grasp_axis[1] = sin(midpoint_angle);
       grasp_axis[2] = 0.0;
     }
     
-    // 计算最佳抓取偏移量，根据物体实际尺寸
     float grasp_offset = calculateGraspOffset(
         object_clusters[i], 
         centroid, 
@@ -1511,7 +1508,7 @@ bool cw2::graspAndPlaceObjectsOfType(
     }
     
     // Increment stack height for next object
-    current_stack_height += 0.05; // Add 3cm for each stacked object
+    current_stack_height += 0.04; // Add 40mm for each stacked object
     objects_grasped++;
     
     ROS_INFO("Successfully grasped and placed object %zu", i);
@@ -1926,80 +1923,66 @@ void cw2::addFloorCollisionObject() {
 }
 
 /**
- * Callback for point cloud data during continuous scanning
- * Processes and stores point clouds with optimizations:
- * - Downsamples using voxel grid
- * - Filters out green floor points immediately
- * - Only processes every N frames based on interval setting
+ * Callback for the point cloud subscription in continuous scanning mode
  */
 void cw2::continuousScanCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg) {
-  // Only process if we're in collection mode
+  // Only process clouds when scanning is active
   if (!is_collecting_clouds_) {
     return;
   }
   
-  // Increment counter and only process every Nth frame
-  cloud_frame_counter_++;
-  if (cloud_frame_counter_ % t3_pointcloud_save_interval_ != 0) {
+  // Process every Nth frame to avoid overwhelming memory
+  if (cloud_frame_counter_++ % t3_pointcloud_save_interval_ != 0) {
     return;
   }
   
-  ROS_INFO("Processing cloud frame %d", cloud_frame_counter_);
+  ROS_INFO("Processing point cloud frame %d", cloud_frame_counter_);
   
-  // Convert ROS message to PCL
+  // Convert from ROS message to PCL point cloud
   PointCPtr cloud(new PointC);
   pcl::fromROSMsg(*msg, *cloud);
   
-  // Transform to base frame
-  PointCPtr transformed_cloud(new PointC);
-  if (!msg->header.frame_id.empty() && msg->header.frame_id != base_frame_) {
-    try {
-      geometry_msgs::TransformStamped transform = 
-          tf_buffer_.lookupTransform(base_frame_, msg->header.frame_id, ros::Time(0));
-      
-      // Use pcl_ros transform function directly instead of Eigen conversion
-      pcl_ros::transformPointCloud(*cloud, *transformed_cloud, transform.transform);
-    } catch (tf2::TransformException &ex) {
-      ROS_WARN("Could not transform point cloud from %s to %s: %s", 
-               msg->header.frame_id.c_str(), base_frame_.c_str(), ex.what());
-      return;
-    }
-  } else {
-    *transformed_cloud = *cloud;
-  }
-  
-  // Filter out green points (floor)
-  PointCPtr non_green_cloud(new PointC);
-  for (const auto& point : transformed_cloud->points) {
-    if (!isGreenPoint(point)) {
-      non_green_cloud->points.push_back(point);
-    }
-  }
-  non_green_cloud->width = non_green_cloud->points.size();
-  non_green_cloud->height = 1;
-  non_green_cloud->is_dense = false;
-  
-  // Skip if empty after green filtering
-  if (non_green_cloud->empty()) {
+  // Skip empty clouds
+  if (cloud->empty()) {
+    ROS_WARN("Received empty point cloud, skipping");
     return;
   }
   
-  // Downsample using voxel grid filter
+  // Transform cloud to base frame if needed
+  if (msg->header.frame_id != base_frame_) {
+    try {
+      // Look up transform from camera frame to base frame
+      geometry_msgs::TransformStamped transformStamped = 
+          tf_buffer_.lookupTransform(base_frame_, msg->header.frame_id, ros::Time(0), ros::Duration(0.5));
+      
+      // Transform point cloud
+      PointCPtr transformed_cloud(new PointC);
+      pcl_ros::transformPointCloud(*cloud, *transformed_cloud, transformStamped.transform);
+      cloud = transformed_cloud;
+    } catch (tf2::TransformException &ex) {
+      ROS_WARN("Could not transform point cloud from frame %s to %s: %s", 
+               msg->header.frame_id.c_str(), base_frame_.c_str(), ex.what());
+      return;
+    }
+  }
+  
+  // Filter out green floor and background using the same logic as filterPointCloudByColor
+  PointCPtr filtered_cloud = filterPointCloudByColor(cloud);
+  
+  // Downsample using voxel grid filter to speed up processing and reduce memory usage
   PointCPtr downsampled_cloud(new PointC);
   pcl::VoxelGrid<PointT> voxel_filter;
-  voxel_filter.setInputCloud(non_green_cloud);
+  voxel_filter.setInputCloud(filtered_cloud);
   voxel_filter.setLeafSize(t3_continuous_scan_voxel_size_, 
-                          t3_continuous_scan_voxel_size_, 
-                          t3_continuous_scan_voxel_size_);
+                           t3_continuous_scan_voxel_size_, 
+                           t3_continuous_scan_voxel_size_);
   voxel_filter.filter(*downsampled_cloud);
   
-  // Store the processed cloud
+  // Save the filtered and downsampled cloud
   collected_clouds_.push_back(downsampled_cloud);
   
-  // Publish for visualization (optional, can be disabled to save resources)
-  if (debug_) {
-    publishPointCloud(downsampled_cloud, cloud_filtered_pub_);
-  }
+  ROS_INFO("Added cloud with %zu points (after filtering and downsampling from %zu points)",
+           downsampled_cloud->points.size(), cloud->points.size());
 }
 
 /**
@@ -2032,7 +2015,7 @@ bool cw2::isGreenPoint(const PointT& point) {
   
   // Green floor HSV ranges (adjust as needed for your environment)
   // Typically green is around H=120, but range may vary
-  return (h >= 80.0f && h <= 160.0f && s >= 0.1f && v >= 0.1f);
+  return (h >= 60.0f && h <= 160.0f && s >= 0.05f && v >= 0.1f);
 }
 
 /**
@@ -2263,50 +2246,42 @@ bool cw2::moveAlongCartesianPath(
   }
 }
 
-// 计算从中心点到边缘的距离，并向内缩10mm作为偏移量
+// Calculate 
 float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& centroid, 
                            const Eigen::Vector3f& grasp_axis, bool is_cross) {
-  // 默认偏移值
   float default_offset = is_cross ? 0.06 : 0.08;
   
-  // 如果点云为空，返回默认值
   if (object_cloud->empty()) {
     ROS_WARN("Empty point cloud, using default offset: %.1fmm", default_offset * 1000.0);
     return default_offset;
   }
   
-  // 找到沿抓取轴方向最远的点
   float max_dist = 0.0f;
   
   for (const auto& point : object_cloud->points) {
-    // 计算点到中心的向量
     Eigen::Vector3f point_vector(point.x - centroid[0], 
                                  point.y - centroid[1], 
-                                 0); // 只考虑XY平面
+                                 0); 
     
-    // 计算在抓取轴方向上的距离
     float projection = point_vector.dot(grasp_axis);
     
-    // 只考虑正方向（即抓取方向）上的点
     if (projection > 0) {
       max_dist = std::max(max_dist, projection);
     }
   }
   
-  // 如果没有找到合适的点，返回默认值
-  if (max_dist < 0.01) { // 小于1cm认为无效
+  if (max_dist < 0.01) { 
     ROS_WARN("Could not find valid edge point, using default offset: %.1fmm", default_offset * 1000.0);
     return default_offset;
   }
   
   float offset;
 
-  // 从边缘向内缩10mm
   if (is_cross){
-    offset = max_dist / 2.0 - 0.01;
+    offset = max_dist / 2.0 + t3_cross_grasp_offset_base_;
   }
   else {
-    offset = max_dist + t3_noughts_grasp_offset_;
+    offset = max_dist + t3_nought_grasp_offset_base_;
   }
   
   ROS_INFO("Calculated grasp offset: %.1fmm (edge distance: %.1fmm, inset: 10mm)", 

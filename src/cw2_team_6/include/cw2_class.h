@@ -165,7 +165,7 @@ public:
   processPointCloud(const PointCPtr& input_cloud);
 
   bool 
-  determineShapeTypeFromCamera(PointCPtr object_cloud, const geometry_msgs::Point &center_point);
+  determineObjectShape(PointCPtr object_cloud, const geometry_msgs::Point &center_point);
 
   // Grasp visualization
   void visualizeGraspPoint(const geometry_msgs::Point &grasp_point, const tf2::Quaternion &orientation);
@@ -312,7 +312,8 @@ public:
   int cloud_frame_counter_;
   int t3_pointcloud_save_interval_;  // Save every Nth frame
   float t3_continuous_scan_voxel_size_; // Voxel filter size during continuous scanning
-  float t3_noughts_grasp_offset_;
+  float t3_nought_grasp_offset_base_;
+  float t3_cross_grasp_offset_base_;
   float t3_merge_voxel_size_;
 
 private:

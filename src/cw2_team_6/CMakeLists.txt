@@ -18,10 +18,8 @@ find_package(catkin REQUIRED COMPONENTS
   tf2_geometry_msgs
   tf2_eigen
   pcl_ros
-  cw2_world_spawner
   sensor_msgs
-  cv_bridge
-  image_transport
+  cw2_world_spawner
 )
 
 ## System dependencies are found with CMake's conventions
