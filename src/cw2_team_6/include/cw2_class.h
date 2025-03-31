@@ -19,6 +19,7 @@ solution is contained within the cw2_team_<your_team_number> package */
 #include <geometry_msgs/Point.h>
 #include <geometry_msgs/Vector3.h>
 #include <geometry_msgs/Quaternion.h>
+#include <geometry_msgs/Point.h>
 // MoveIt specific includes
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
@@ -229,7 +230,7 @@ public:
 
   float 
   calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& centroid, 
-                           const Eigen::Vector3f& grasp_axis, bool is_cross);
+                           const ObjectOrientationData& orientation_data, bool is_cross);
 
   //////////////////////////////////////////////////////////////////////////////////////////////////
   /* ----- class member variables ----- */

@@ -98,12 +98,12 @@ cw2::cw2_config()
   t3_continuous_scan_voxel_size_ = 0.002; // 2mm voxel size for downsampling
   t3_merge_voxel_size_ = 0.001; // 1mm voxel for merged cloud
   
-  t3_cross_grasp_offset_base_ = 0.02;
-  t3_nought_grasp_offset_base_ = 0.02;
+  t3_cross_grasp_offset_base_ = 0.01;
+  t3_nought_grasp_offset_base_ = 0.005;
   // Euclidean clustering parameters
   t3_cluster_tolerance_ = 0.005;    // 2mm tolerance between points in cluster
   t3_min_cluster_size_ = 500; 
-  t3_max_cluster_size_ = 20000;
+  t3_max_cluster_size_ = 50000;
 
   return;
 }
@@ -369,6 +369,7 @@ cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   // 3. Extract black obstacles for collision avoidance
   PointCPtr obstacles_cloud = extractBlackObstacles(merged_cloud);
   addObstaclesToPlanningScene(obstacles_cloud);
+  addFloorCollisionObject();
   
   // 4. Extract the remaining colored objects (red, blue, purple)
   PointCPtr objects_cloud = extractGraspableObjects(merged_cloud);
@@ -1033,84 +1034,122 @@ PointCPtr cw2::extractBrownBasket(const PointCPtr& cloud) {
   return basket_cloud;
 }
 
-// Find the center of the basket
+/**
+ * Finds the center of the basket from a point cloud
+ * @param basket_cloud Point cloud of the brown basket
+ * @return 3D point representing the basket center
+ */
 geometry_msgs::Point cw2::findBasketCenter(const PointCPtr& basket_cloud) {
-  ROS_INFO("Finding basket center from %lu points", basket_cloud->points.size());
-  
-  geometry_msgs::Point center;
+  ROS_INFO("Finding basket center from %zu points", basket_cloud->points.size());
   
   if (basket_cloud->empty()) {
-    ROS_WARN("Basket cloud is empty, returning default center");
-    center.x = 0.0;
-    center.y = 0.0;
-    center.z = 0.0;
-    return center;
+    ROS_ERROR("Empty basket cloud provided");
+    geometry_msgs::Point empty_point;
+    empty_point.x = 0;
+    empty_point.y = 0;
+    empty_point.z = 0;
+    return empty_point;
   }
   
-  // Cluster the basket points (in case there are multiple brown objects)
+  PointCPtr downsampled_cloud(new PointC);
+  pcl::VoxelGrid<PointT> voxel_filter;
+  voxel_filter.setInputCloud(basket_cloud);
+  float voxel_size = 0.005; // 5mm voxel size
+  voxel_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
+  voxel_filter.filter(*downsampled_cloud);
+  
+  ROS_INFO("Downsampled basket cloud from %zu to %zu points with 5mm voxel filter",
+           basket_cloud->points.size(), downsampled_cloud->points.size());
+  
+  pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
   std::vector<pcl::PointIndices> cluster_indices;
   pcl::EuclideanClusterExtraction<PointT> ec;
-  pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
   
-  tree->setInputCloud(basket_cloud);
+  tree->setInputCloud(downsampled_cloud);
   ec.setClusterTolerance(0.05);  // 5cm tolerance
-  ec.setMinClusterSize(500);     // Minimum 100 points per cluster
+  ec.setMinClusterSize(500);     // Minimum 500 points per cluster
   ec.setMaxClusterSize(100000);  // Maximum 100k points per cluster
   ec.setSearchMethod(tree);
-  ec.setInputCloud(basket_cloud);
+  ec.setInputCloud(downsampled_cloud);
   ec.extract(cluster_indices);
   
-  ROS_INFO("Found %zu clusters in basket cloud", cluster_indices.size());
+  if (cluster_indices.empty()) {
+    ROS_ERROR("No clusters found in basket cloud");
+    geometry_msgs::Point empty_point;
+    empty_point.x = 0;
+    empty_point.y = 0;
+    empty_point.z = 0;
+    return empty_point;
+  }
   
-  // Find the largest cluster (assume it's the basket)
+  // 找到最大的簇
   size_t max_size = 0;
-  int max_cluster_idx = -1;
-  
+  int max_idx = 0;
   for (size_t i = 0; i < cluster_indices.size(); i++) {
-    size_t cluster_size = cluster_indices[i].indices.size();
-    ROS_INFO("Cluster %zu has %zu points", i, cluster_size);
-    
-    if (cluster_size > max_size) {
-      max_size = cluster_size;
-      max_cluster_idx = i;
+    if (cluster_indices[i].indices.size() > max_size) {
+      max_size = cluster_indices[i].indices.size();
+      max_idx = i;
     }
   }
   
-  if (max_cluster_idx == -1) {
-    ROS_WARN("No valid basket cluster found, using centroid of all brown points");
+  ROS_INFO("Found %zu clusters in basket cloud, largest has %zu points",
+           cluster_indices.size(), max_size);
+  
+  // 可视化簇（仅在调试模式）
+  if (debug_) {
+    PointCPtr colored_clusters(new PointC);
     
-    // Compute centroid of all points
-    Eigen::Vector4f centroid;
-    pcl::compute3DCentroid(*basket_cloud, centroid);
-    
-    center.x = centroid[0];
-    center.y = centroid[1];
-    center.z = centroid[2];
-  } else {
-    // Extract the largest cluster
-    PointCPtr basket_cluster(new PointC);
-    
-    for (const auto& idx : cluster_indices[max_cluster_idx].indices) {
-      basket_cluster->points.push_back(basket_cloud->points[idx]);
+    for (size_t i = 0; i < cluster_indices.size(); i++) {
+      // 使用固定颜色以便于识别
+      uint8_t r = 50;
+      uint8_t g = 50;
+      uint8_t b = 50;
+      
+      if (i == max_idx) {
+        r = 255;  // 最大簇显示为红色
+        g = 0;
+        b = 0;
+      }
+      
+      for (const auto& idx : cluster_indices[i].indices) {
+        PointT colored_point = downsampled_cloud->points[idx];
+        colored_point.r = r;
+        colored_point.g = g;
+        colored_point.b = b;
+        colored_clusters->points.push_back(colored_point);
+      }
     }
     
-    basket_cluster->width = basket_cluster->points.size();
-    basket_cluster->height = 1;
-    basket_cluster->is_dense = true;
+    colored_clusters->width = colored_clusters->points.size();
+    colored_clusters->height = 1;
+    colored_clusters->is_dense = false;
     
-    // Compute centroid of the cluster
-    Eigen::Vector4f centroid;
-    pcl::compute3DCentroid(*basket_cluster, centroid);
-    
-    center.x = centroid[0];
-    center.y = centroid[1];
-    center.z = centroid[2];
-    
-    ROS_INFO("Found basket center at [%f, %f, %f] from largest cluster with %zu points",
-             center.x, center.y, center.z, max_size);
+    publishPointCloud(colored_clusters, cloud_filtered_pub_);
   }
   
-  return center;
+  // 从最大簇中计算质心
+  PointCPtr largest_cluster(new PointC);
+  for (const auto& idx : cluster_indices[max_idx].indices) {
+    largest_cluster->points.push_back(downsampled_cloud->points[idx]);
+  }
+  
+  largest_cluster->width = largest_cluster->points.size();
+  largest_cluster->height = 1;
+  largest_cluster->is_dense = false;
+  
+  Eigen::Vector4f centroid;
+  pcl::compute3DCentroid(*largest_cluster, centroid);
+  
+  // 创建并返回篮子中心点
+  geometry_msgs::Point basket_center;
+  basket_center.x = centroid[0];
+  basket_center.y = centroid[1];
+  basket_center.z = centroid[2];
+  
+  ROS_INFO("Basket center found at [%.4f, %.4f, %.4f]", 
+           basket_center.x, basket_center.y, basket_center.z);
+  
+  return basket_center;
 }
 
 // Extract black obstacles from the point cloud
@@ -1246,20 +1285,20 @@ bool cw2::clusterAndClassifyObjects(
     std::vector<PointCPtr>& object_clusters,
     std::vector<bool>& is_cross_shape,
     std::vector<ObjectOrientationData>& object_orientations) {
-  
-  ROS_INFO("Clustering and classifying objects...");
-  
-  if (objects_cloud->empty()) {
-    ROS_ERROR("Objects cloud is empty, cannot cluster");
-    return false;
-  }
+
+  ROS_INFO("Clustering and classifying objects from %zu points", objects_cloud->points.size());
   
   // Clear output vectors
   object_clusters.clear();
   is_cross_shape.clear();
   object_orientations.clear();
   
-  // Create KdTree for clustering
+  if (objects_cloud->empty()) {
+    ROS_WARN("Empty cloud provided for clustering");
+    return false;
+  }
+  
+  // Create KdTree for searching
   pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
   tree->setInputCloud(objects_cloud);
   
@@ -1273,86 +1312,107 @@ bool cw2::clusterAndClassifyObjects(
   ec.setInputCloud(objects_cloud);
   ec.extract(cluster_indices);
   
-  ROS_INFO("====== CLUSTERING RESULTS ======");
-  ROS_INFO("Found %zu object clusters", cluster_indices.size());
+  ROS_INFO("Found %zu clusters in the scene", cluster_indices.size());
   
-  PointCPtr colored_clusters(new PointC);
-  colored_clusters->header = objects_cloud->header;
+  if (cluster_indices.empty()) {
+    ROS_WARN("No object clusters found");
+    return false;
+  }
   
-  visualization_msgs::MarkerArray all_pca_markers;
+  // 创建一个全局的彩色点云，用于可视化所有聚类
+  PointCPtr all_clusters_cloud(new PointC);
+  all_clusters_cloud->reserve(objects_cloud->points.size()); // 预分配空间
   
+  // 创建一个PCA轴的集合，用于可视化
+  visualization_msgs::MarkerArray all_pca_axes;
+  
+  // Process each cluster
   for (size_t i = 0; i < cluster_indices.size(); i++) {
-    // Extract cluster
-    PointCPtr cluster(new PointC);
+    ROS_INFO("Processing cluster %zu with %zu points", i, cluster_indices[i].indices.size());
+    
+    // Extract cluster points
+    PointCPtr cluster_cloud(new PointC);
     for (const auto& idx : cluster_indices[i].indices) {
-      cluster->points.push_back(objects_cloud->points[idx]);
+      cluster_cloud->points.push_back(objects_cloud->points[idx]);
     }
-    cluster->width = cluster->points.size();
-    cluster->height = 1;
-    cluster->is_dense = true;
-    cluster->header = objects_cloud->header;
+    cluster_cloud->width = cluster_cloud->points.size();
+    cluster_cloud->height = 1;
+    cluster_cloud->is_dense = false;
     
-    ROS_INFO("Cluster %zu has %lu points", i+1, cluster->points.size());
-    
-    // Compute centroid for shape determination
+    // Compute cluster centroid
     Eigen::Vector4f centroid;
-    pcl::compute3DCentroid(*cluster, centroid);
+    pcl::compute3DCentroid(*cluster_cloud, centroid);
     
+    // Create center point for shape determination
     geometry_msgs::Point center_point;
     center_point.x = centroid[0];
     center_point.y = centroid[1];
     center_point.z = centroid[2];
     
-    // Determine if it's a cross shape using the centroid method
-    bool is_cross = determineObjectShape(cluster, center_point);
-    
-    ROS_INFO("Cluster %zu is a %s shape", i+1, is_cross ? "CROSS" : "NOUGHT");
+    // Determine if it's a cross shape
+    bool is_cross = determineObjectShape(cluster_cloud, center_point);
+    ROS_INFO("Cluster %zu classified as %s", i, is_cross ? "CROSS" : "NOUGHT");
     
     // Determine object orientation using PCA
     std::string shape_type = is_cross ? "cross" : "nought";
-    ObjectOrientationData orientation_data = determineObjectOrientation(cluster, shape_type);
+    ObjectOrientationData orientation_data = determineObjectOrientation(cluster_cloud, shape_type);
     
     if (orientation_data.is_valid) {
       // Add to output vectors
-      object_clusters.push_back(cluster);
+      object_clusters.push_back(cluster_cloud);
       is_cross_shape.push_back(is_cross);
       object_orientations.push_back(orientation_data);
     } else {
-      ROS_WARN("Could not determine valid orientation for cluster %zu, skipping", i+1);
+      ROS_WARN("Could not determine valid orientation for cluster %zu, skipping", i);
+      continue; // Skip visualization for invalid orientation
     }
-  
-    uint8_t r = 50;
-    uint8_t g = 50;
-    uint8_t b = 50;
+    
+    // Add color-coded points to visualization cloud
+    uint8_t r = 50 + (i * 40) % 200;
+    uint8_t g = 50 + ((i * 70) % 200);
+    uint8_t b = 50 + ((i * 90) % 200);
+    
+    // 更亮的颜色表示十字, 更暗的颜色表示圆环
+    if (is_cross) {
+      r = std::min(255, int(r * 1.5));
+      g = std::min(255, int(g * 1.5));
+      b = std::min(255, int(b * 1.5));
+    }
 
     for (const auto& idx : cluster_indices[i].indices) {
       PointT colored_point = objects_cloud->points[idx];
       colored_point.r = r;
       colored_point.g = g;
       colored_point.b = b;
-      colored_clusters->points.push_back(colored_point);
+      all_clusters_cloud->points.push_back(colored_point);
     }
     
-    if (orientation_data.is_valid) {
-      visualization_msgs::MarkerArray cluster_pca_markers = createPCAAxesMarkers(
-          centroid, orientation_data.primary_axis, orientation_data.secondary_axis, 
-          i, shape_type);
-      
-      for (const auto& marker : cluster_pca_markers.markers) {
-        all_pca_markers.markers.push_back(marker);
-      }
+    // Create PCA visualization markers for this cluster
+    visualization_msgs::MarkerArray pca_markers = createPCAAxesMarkers(
+        centroid, orientation_data.primary_axis, orientation_data.secondary_axis, i*10, 
+        shape_type);
+    
+    // Add the markers to the global collection
+    for (const auto& marker : pca_markers.markers) {
+      all_pca_axes.markers.push_back(marker);
     }
   }
   
-  ROS_INFO("Successfully processed %zu valid object clusters", object_clusters.size());
-  ROS_INFO("======================================");
+  // 设置合并点云的属性
+  all_clusters_cloud->width = all_clusters_cloud->points.size();
+  all_clusters_cloud->height = 1;
+  all_clusters_cloud->is_dense = false;
   
-  colored_clusters->width = colored_clusters->points.size();
-  colored_clusters->height = 1;
-  colored_clusters->is_dense = true;
-  
-  publishPointCloud(colored_clusters, clusters_pub_);
-  all_pca_axes_pub_.publish(all_pca_markers);
+  // 发布可视化
+  if (debug_) {
+    // 一次性发布所有聚类点云
+    publishPointCloud(all_clusters_cloud, clusters_pub_);
+    
+    // 发布所有PCA轴
+    all_pca_axes_pub_.publish(all_pca_axes);
+    
+    ROS_INFO("Published visualization of %zu clusters with PCA axes", cluster_indices.size());
+  }
   
   return !object_clusters.empty();
 }
@@ -1414,7 +1474,97 @@ visualization_msgs::MarkerArray cw2::createPCAAxesMarkers(
   return marker_array;
 }
 
-// Grasp and place all objects of the specified type
+/**
+ * Calculates the optimal grasp offset based on object dimensions
+ * @param object_cloud The point cloud of the object
+ * @param centroid The object's centroid
+ * @param orientation_data The pre-calculated orientation data from determineObjectOrientation
+ * @param is_cross Whether the object is a cross (true) or nought (false)
+ * @return The calculated grasp offset
+ */
+float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& centroid, 
+                           const ObjectOrientationData& orientation_data, bool is_cross) {
+  float default_offset = is_cross ? 0.06 : 0.08;
+  
+  if (object_cloud->empty()) {
+    ROS_WARN("Empty point cloud, using default offset: %.1fmm", default_offset * 1000.0);
+    return default_offset;
+  }
+  
+  float max_dist = 0.0f;
+  
+  // 使用正确的抓取轴，直接从orientation_data中获取
+  Eigen::Vector3f grasp_axis;
+  if (is_cross) {
+    // 对于cross，使用主轴方向
+    grasp_axis = orientation_data.primary_axis;
+  } else {
+    // 对于nought，使用edge_direction（如果已计算）或计算中点方向
+    if (orientation_data.edge_direction.norm() > 0.01) {
+      grasp_axis = orientation_data.edge_direction;
+    } else {
+      // 如果edge_direction未被设置，则使用primary和secondary轴来计算中点方向
+      float primary_angle = atan2(orientation_data.primary_axis[1], 
+                                 orientation_data.primary_axis[0]);
+      float secondary_angle = atan2(orientation_data.secondary_axis[1], 
+                                   orientation_data.secondary_axis[0]);
+      
+      // 处理角度差
+      float angle_diff = secondary_angle - primary_angle;
+      if (angle_diff > M_PI) angle_diff -= 2*M_PI;
+      if (angle_diff < -M_PI) angle_diff += 2*M_PI;
+      
+      float midpoint_angle = primary_angle + angle_diff/2.0;
+      
+      // 中点角度方向
+      grasp_axis[0] = cos(midpoint_angle);
+      grasp_axis[1] = sin(midpoint_angle);
+      grasp_axis[2] = 0.0;
+    }
+  }
+  
+  // 计算沿抓取轴的最大投影距离
+  for (const auto& point : object_cloud->points) {
+    Eigen::Vector3f point_vector(point.x - centroid[0], 
+                                 point.y - centroid[1], 
+                                 0); 
+    
+    float projection = point_vector.dot(grasp_axis);
+    
+    if (projection > 0) {
+      max_dist = std::max(max_dist, projection);
+    }
+  }
+  
+  if (max_dist < 0.01) { 
+    ROS_WARN("Could not find valid edge point, using default offset: %.1fmm", default_offset * 1000.0);
+    return default_offset;
+  }
+  
+  float offset;
+
+  if (is_cross){
+    offset = max_dist / 2.0 + t3_cross_grasp_offset_base_;
+  }
+  else {
+    offset = max_dist + t3_nought_grasp_offset_base_;
+  }
+  
+  ROS_INFO("Calculated grasp offset: %.1fmm (edge distance: %.1fmm)", 
+           offset * 1000.0, max_dist * 1000.0);
+  
+  return offset;
+}
+
+/**
+ * Plan and execute grasping and placing of objects by type
+ * @param object_clusters Vector of object point clouds
+ * @param is_cross_shape Vector of booleans indicating if each object is a cross
+ * @param object_orientations Vector of orientation data for each object
+ * @param grasp_cross_shape Whether to grasp cross (true) or nought (false) objects
+ * @param basket_center Position of the basket center for placing
+ * @return true if at least one object was successfully grasped and placed
+ */
 bool cw2::graspAndPlaceObjectsOfType(
     const std::vector<PointCPtr>& object_clusters,
     const std::vector<bool>& is_cross_shape,
@@ -1456,31 +1606,11 @@ bool cw2::graspAndPlaceObjectsOfType(
     object_center.z = centroid[2];
     object_center.z += t3_grasp_height_offset_;
     
-    Eigen::Vector3f grasp_axis;
-    if (is_cross_shape[i]) {
-
-      grasp_axis = object_orientations[i].primary_axis;
-    } else {
-      float primary_angle = atan2(object_orientations[i].primary_axis[1], 
-                                 object_orientations[i].primary_axis[0]);
-      float secondary_angle = atan2(object_orientations[i].secondary_axis[1], 
-                                   object_orientations[i].secondary_axis[0]);
-      
-      float angle_diff = secondary_angle - primary_angle;
-      if (angle_diff > M_PI) angle_diff -= 2*M_PI;
-      if (angle_diff < -M_PI) angle_diff += 2*M_PI;
-      
-      float midpoint_angle = primary_angle + angle_diff/2.0;
-      
-      grasp_axis[0] = cos(midpoint_angle);
-      grasp_axis[1] = sin(midpoint_angle);
-      grasp_axis[2] = 0.0;
-    }
-    
+    // 计算最佳抓取偏移量，直接使用orientation_data而不重新计算
     float grasp_offset = calculateGraspOffset(
         object_clusters[i], 
         centroid, 
-        grasp_axis, 
+        object_orientations[i],  // 直接传递完整的orientation_data
         is_cross_shape[i]);
     
     // Execute the grasp with calculated offset
@@ -1508,7 +1638,7 @@ bool cw2::graspAndPlaceObjectsOfType(
     }
     
     // Increment stack height for next object
-    current_stack_height += 0.04; // Add 40mm for each stacked object
+    current_stack_height += 0.03; // Add 3cm for each stacked object
     objects_grasped++;
     
     ROS_INFO("Successfully grasped and placed object %zu", i);
@@ -2244,48 +2374,4 @@ bool cw2::moveAlongCartesianPath(
             fraction * 100.0);
     return false;
   }
-}
-
-// Calculate 
-float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& centroid, 
-                           const Eigen::Vector3f& grasp_axis, bool is_cross) {
-  float default_offset = is_cross ? 0.06 : 0.08;
-  
-  if (object_cloud->empty()) {
-    ROS_WARN("Empty point cloud, using default offset: %.1fmm", default_offset * 1000.0);
-    return default_offset;
-  }
-  
-  float max_dist = 0.0f;
-  
-  for (const auto& point : object_cloud->points) {
-    Eigen::Vector3f point_vector(point.x - centroid[0], 
-                                 point.y - centroid[1], 
-                                 0); 
-    
-    float projection = point_vector.dot(grasp_axis);
-    
-    if (projection > 0) {
-      max_dist = std::max(max_dist, projection);
-    }
-  }
-  
-  if (max_dist < 0.01) { 
-    ROS_WARN("Could not find valid edge point, using default offset: %.1fmm", default_offset * 1000.0);
-    return default_offset;
-  }
-  
-  float offset;
-
-  if (is_cross){
-    offset = max_dist / 2.0 + t3_cross_grasp_offset_base_;
-  }
-  else {
-    offset = max_dist + t3_nought_grasp_offset_base_;
-  }
-  
-  ROS_INFO("Calculated grasp offset: %.1fmm (edge distance: %.1fmm, inset: 10mm)", 
-           offset * 1000.0, max_dist * 1000.0);
-  
-  return offset;
 }
