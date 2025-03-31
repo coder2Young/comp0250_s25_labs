@@ -360,6 +360,8 @@ private:
   int cloud_frame_counter_;
   int t3_pointcloud_save_interval_;  // Save every Nth frame
   float t3_continuous_scan_voxel_size_; // Voxel filter size during continuous scanning
+  float t3_noughts_grasp_offset_;
+  float t3_merge_voxel_size_;
   
   // New cloud callback and processing methods
   void continuousScanCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg);

@@ -11,17 +11,10 @@ cw2::cw2(ros::NodeHandle nh):
   tf_buffer_(),
   tf_listener_(tf_buffer_),
   collision_object_vector_(),
-  octomap_received_(false),
-  // Initialize scanning motion parameters
-  scan_radius_(0.2),          // 20cm radius around object 
-  scan_height_offset_(0.3),   // 30cm above object height
-  num_scan_poses_(4),          // 4 positions around the object
-  pick_lift_offset_(0.5),       // 0.5m lifting position after grasping
   arm_group_("panda_arm"),
   hand_group_("hand")
 {
   /* class constructor */
-
   nh_ = nh;
 
   // advertise solutions for coursework tasks
@@ -37,41 +30,25 @@ cw2::cw2(ros::NodeHandle nh):
   cloud_filtered_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_filtered", 1, true);
   cloud_object_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/cloud_object", 1, true);
   pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/pca_axes", 1, true);
-  // // Use for debug visualization, not for OctoMap input
-  // filtered_cloud_for_octomap_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/filtered_cloud", 1, true);
-  // Add center point marker publisher
   center_point_marker_pub_ = nh_.advertise<visualization_msgs::Marker>("/debug/center_point", 1, true);
-  // Add grasp point visualization publisher
   grasp_marker_pub_ = nh_.advertise<visualization_msgs::Marker>("/debug/grasp_point", 1, true);
-  
-  // Initialize OctoMap-related subscribers and clients
-  octomap_sub_ = nh_.subscribe("/octomap_binary", 1, &cw2::octomap_callback, this);
-  octomap_client_ = nh_.serviceClient<octomap_msgs::GetOctomap>("/octomap_full");
-
-  planning_scene_monitor_.startSceneMonitor(); 
-  planning_scene_monitor_.startWorldGeometryMonitor();  
-  planning_scene_monitor_.startStateMonitor(); 
-
-  cw2_config();
-  
-  ROS_INFO("cw2 class initialised");
-
-  // Add this function to create and add a floor collision object
-  addFloorCollisionObject();
-
-  // Initialize additional visualization publishers
   clusters_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/object_clusters", 1, true);
   obstacles_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("/debug/obstacles_cloud", 1, true);
   all_pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/all_pca_axes", 1, true);
 
-  // Always subscribe to point cloud topic
+  // Sub for task3
   cloud_sub_ = nh_.subscribe("/r200/camera/depth_registered/points", 1, &cw2::continuousScanCloudCallback, this);
-  
-  ROS_INFO("Point cloud subscriber initialized");
-  
   // Set the initial collection state to false
   is_collecting_clouds_ = false;
   cloud_frame_counter_ = 0;
+
+  // Add floor collision object to prevent collisions with the ground
+  addFloorCollisionObject();
+
+  cw2_config();
+
+  ROS_INFO("cw2 class initialised");
+  return;
 }
 
 cw2::~cw2() {
@@ -89,16 +66,13 @@ cw2::cw2_config()
   debug_ = true;
   ROS_INFO("Debug mode is enabled");
 
-  box_size_ = 0.04;
-  basket_size_ = 0.1;
+  // Basic pick and place parameters
   hand_offset_ = 0.15; // 0.15 default
   gripper_open_ = 0.08;
   gripper_closed_ = 0.0;
-  grasp_stanby_height_ = 0.1;
+  grasp_stanby_height_ = 0.15;
   place_stanby_height_ = 0.1;
-  pick_lift_offset_ = 0.5; // 50cm higher position for lifting objects
-  ground_length_ = 0.6;
-  ground_width_ = 0.6;
+  pick_lift_offset_ = 0.4; // 50cm higher position for lifting objects
   
   grasp_orientation_.x = 0.923953;
   grasp_orientation_.y = -0.382500;
@@ -111,18 +85,13 @@ cw2::cw2_config()
   scan_pose_.position.z = 0.88;
   scan_pose_.orientation = grasp_orientation_;
   
-  position_precision_ = 1000.0;
-  box_basket_size_thresh_ = 900;
-  cluster_color_thresh_ = 140;
-  cluster_dist_thresh_ = 0.04;
-  min_cluster_thresh_ = 200;
 
   scan_height_ = 0.7;
   
   // Euclidean clustering parameters
-  cluster_tolerance_ = 0.05;    // 2cm tolerance between points in cluster
-  min_cluster_size_ = 10;       // Minimum 50 points per cluster
-  max_cluster_size_ = 25000;    // Maximum 25000 points per cluster
+  cluster_tolerance_ = 0.001;    // 2cm tolerance between points in cluster
+  min_cluster_size_ = 500;       // Minimum 50 points per cluster
+  max_cluster_size_ = 20000;    // Maximum 25000 points per cluster
   
   // Scanning motion parameters
   num_scan_poses_ = 4;          // Number of scan poses around the object
@@ -137,10 +106,9 @@ cw2::cw2_config()
   // Added for Task 1 direct point cloud approach
   t1_downsample_ = false;  // Turn off downsampling initially for better PCA
   t1_move_constraint_ = false;  // Enable movement constraints for better grasping
-  t1_scan_height_ = 0.5;  // Height above object for scanning (50cm)
+  t1_scan_height_ = 0.55;  // Height above object for scanning
 
-  // Add floor collision object to prevent collisions with the ground
-  addFloorCollisionObject();
+
 
   // Task 3 specific parameters
   t3_scan_height_ = 0.65;           // Height for scanning the entire scene (lowered from 0.6)
@@ -149,10 +117,14 @@ cw2::cw2_config()
   // Continuous scanning parameters
   t3_pointcloud_save_interval_ = 10;     // Process every 10th frame
   t3_continuous_scan_voxel_size_ = 0.002; // 2mm voxel size for downsampling
+  t3_merge_voxel_size_ = 0.001;
   
+  t3_noughts_grasp_offset_ = 0.02;
+
   // Initialize scanning state
   is_collecting_clouds_ = false;
   cloud_frame_counter_ = 0;
+
 
   return;
 }
@@ -189,7 +161,7 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   scan_pose.header.frame_id = base_frame_;
   scan_pose.pose.position.x = object_point.point.x;
   scan_pose.pose.position.y = object_point.point.y;
-  scan_pose.pose.position.z = object_point.point.z + t1_scan_height_; // 50cm above object
+  scan_pose.pose.position.z = object_point.point.z + t1_scan_height_;
   scan_pose.pose.orientation = grasp_orientation_; // Using the default orientation looking down
   
   bool scan_success = moveArm(scan_pose);
@@ -257,24 +229,6 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
 
   ROS_INFO("\n====== TASK 1 COMPLETED ======\n");
   return true;
-}
-
-bool cw2::moveToScanPosition(const geometry_msgs::Point &target_point) {
-  ROS_INFO("Moving to scan position above the object");
-  
-  // Create scan position - above the object
-  geometry_msgs::PoseStamped scan_pose;
-  scan_pose.header.frame_id = base_frame_;
-  scan_pose.pose.position.x = target_point.x;
-  scan_pose.pose.position.y = target_point.y;
-  scan_pose.pose.position.z = target_point.z + scan_height_;
-  
-  // Set camera to look down at the object
-  scan_pose.pose.orientation = grasp_orientation_;
-  
-  // Move arm to scanning position
-  ROS_INFO("Moving to scan position above the object at %f, %f, %f", scan_pose.pose.position.x, scan_pose.pose.position.y, scan_pose.pose.position.z);
-  return moveArm(scan_pose);
 }
 
 ObjectOrientationData cw2::determineObjectOrientation(
@@ -630,7 +584,7 @@ bool cw2::planAndExecuteGrasp(
   // 执行Cartesian路径
   double eef_step = 0.001;       // 1cm步长
   double jump_threshold = 0.0;  // 禁用跳跃阈值检查
-  double speed_factor = 0.1;    // 降低速度到20%，确保平稳下降
+  double speed_factor = 0.05;    // 降低速度到20%，确保平稳下降
   
   ROS_INFO("Executing vertical approach using Cartesian path (speed: %.1f%%)", speed_factor * 100);
   bool cartesian_success = moveAlongCartesianPath(vertical_waypoints, eef_step, jump_threshold, speed_factor);
@@ -709,7 +663,7 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
   // 执行Cartesian路径
   double eef_step = 0.001;       // 1cm步长
   double jump_threshold = 0.0;  // 禁用跳跃阈值检查
-  double speed_factor = 0.1;    // 降低速度到20%，确保平稳下降
+  double speed_factor = 0.05;    // 降低速度到20%，确保平稳下降
   
   ROS_INFO("Executing vertical descent using Cartesian path (speed: %.1f%%)", speed_factor * 100);
   bool cartesian_success = moveAlongCartesianPath(vertical_waypoints, eef_step, jump_threshold, speed_factor);
@@ -1435,7 +1389,7 @@ void cw2::addObstaclesToPlanningScene(const PointCPtr& obstacles_cloud) {
   planning_scene.world.octomap.header.frame_id = base_frame_;
   
   // Convert point cloud to octomap
-  octomap::OcTree* obstacles_octree = new octomap::OcTree(0.02); // 2cm resolution
+  octomap::OcTree* obstacles_octree = new octomap::OcTree(0.01); // 2cm resolution
   
   // Create a pointcloud2 message from pcl point cloud
   sensor_msgs::PointCloud2 cloud_msg;
@@ -2039,266 +1993,6 @@ void cw2::octomap_callback(const octomap_msgs::Octomap::ConstPtr& msg) {
   octomap_received_ = true;
 }
 
-// Perform scanning motion around the object to collect better point cloud data
-bool cw2::performScanningMotion(const geometry_msgs::Point &target_point) {
-  ROS_INFO("\n====== PERFORMING SCANNING MOTION ======");
-  ROS_INFO("Starting scanning motion around object at [%f, %f, %f]",
-           target_point.x, target_point.y, target_point.z);
-  
-  // Create a set of poses around the object
-  std::vector<geometry_msgs::PoseStamped> scan_poses;
-  
-  // Height of camera during scanning - use a consistent height
-  float scan_z = target_point.z + scan_height_offset_;
-  
-  // Convert the pre-defined downward-facing orientation to tf2::Quaternion
-  tf2::Quaternion q_base;
-  tf2::convert(grasp_orientation_, q_base);
-  
-  // Generate 4 positions in a square pattern around the object
-  const int num_positions = 4;
-  for (int i = 0; i < num_positions; i++) {
-    float angle = 2.0f * M_PI * i / num_positions; // 0, 90, 180, 270 degrees
-    float x = target_point.x + scan_radius_ * cos(angle);
-    float y = target_point.y + scan_radius_ * sin(angle);
-    
-    // Create scan pose
-    geometry_msgs::PoseStamped pose;
-    pose.header.frame_id = base_frame_;
-    pose.pose.position.x = x;
-    pose.pose.position.y = y;
-    pose.pose.position.z = scan_z;
-    
-    // Use consistent orientation for all scan positions
-    pose.pose.orientation = grasp_orientation_;
-    
-    scan_poses.push_back(pose);
-    
-    ROS_INFO("Scan position %d: [%f, %f, %f] with consistent orientation",
-             i+1, pose.pose.position.x, pose.pose.position.y, pose.pose.position.z);
-  }
-  
-  int successful_scans = 0;
-  
-  // Move to each scan pose
-  for (int i = 0; i < scan_poses.size(); i++) {
-    ROS_INFO("Moving to scan position %zu/%zu", i+1, scan_poses.size());
-    
-    // Move arm to scan position
-    bool move_success = moveArm(scan_poses[i]);
-    if (!move_success) {
-      ROS_WARN("Failed to move to scan position %zu, trying next position", i+1);
-      continue;
-    }
-    
-    // Wait for arm to stabilize
-    ros::Duration(1.0).sleep();
-    
-    // Reset the OctoMap status
-    octomap_received_ = false;
-    
-    // Attempt to get an OctoMap update at this position
-    ros::Time start_time = ros::Time::now();
-    ros::Duration timeout(5.0); // 5-second timeout
-    
-    ROS_INFO("Waiting for OctoMap update at position %zu...", i+1);
-    
-    while (!octomap_received_ && ros::Time::now() - start_time < timeout) {
-      ros::spinOnce();
-      ros::Duration(0.1).sleep();
-    }
-    
-    if (octomap_received_) {
-      ROS_INFO("Successfully received OctoMap update at scan position %zu with %d bytes of data",
-               i+1, (int)latest_octomap_.data.size());
-      successful_scans++;
-    } else {
-      // Try calling the service directly if subscriber didn't work
-      ROS_WARN("Timeout waiting for OctoMap update from subscriber at scan position %zu, trying service call",
-               i+1);
-      
-      octomap_msgs::GetOctomap srv;
-      if (octomap_client_.call(srv)) {
-        latest_octomap_ = srv.response.map;
-        octomap_received_ = true;
-        successful_scans++;
-        ROS_INFO("Successfully received OctoMap from service at scan position %zu", i+1);
-      } else {
-        ROS_ERROR("Failed to receive OctoMap from service at scan position %zu", i+1);
-      }
-    }
-  }
-  
-  ROS_INFO("Completed %d successful scans out of %zu positions", successful_scans, scan_poses.size());
-  
-  // Return to a position above the object
-  geometry_msgs::PoseStamped top_pose;
-  top_pose.header.frame_id = base_frame_;
-  top_pose.pose.position.x = target_point.x;
-  top_pose.pose.position.y = target_point.y;
-  top_pose.pose.position.z = target_point.z + scan_height_;
-  top_pose.pose.orientation = grasp_orientation_;
-  
-  ROS_INFO("Returning to position above object");
-  bool success = moveArm(top_pose);
-  
-  ROS_INFO("====== SCANNING MOTION COMPLETED ======\n");
-  return successful_scans > 0;  // At least one successful scan is required
-}
-
-// Extract point cloud from OctoMap
-PointCPtr cw2::extractPointCloudFromOctomap() {
-  ROS_INFO("\n====== EXTRACTING POINT CLOUD FROM OCTOMAP ======");
-  
-  PointCPtr cloud(new PointC);
-  
-  // Try to get OctoMap from the service if we don't already have one
-  if (!octomap_received_) {
-    ROS_INFO("No OctoMap received yet from subscriber, requesting from service...");
-    octomap_msgs::GetOctomap srv;
-    
-    if (octomap_client_.call(srv)) {
-      latest_octomap_ = srv.response.map;
-      octomap_received_ = true;
-      ROS_INFO("Successfully received OctoMap from service with %d bytes of data", (int)latest_octomap_.data.size());
-    } else {
-      ROS_ERROR("Failed to call OctoMap service. Is the octomap_server running?");
-      return cloud;
-    }
-  } else {
-    ROS_INFO("Using existing OctoMap from subscriber with %d bytes of data", (int)latest_octomap_.data.size());
-  }
-  
-  // Convert OctoMap to octomap::OcTree
-  octomap::AbstractOcTree* abstract_tree = octomap_msgs::msgToMap(latest_octomap_);
-  if (!abstract_tree) {
-    ROS_ERROR("Failed to convert OctoMap message to OcTree");
-    return cloud;
-  }
-  
-  // Convert to OcTree
-  octomap::OcTree* octree = dynamic_cast<octomap::OcTree*>(abstract_tree);
-  if (!octree) {
-    ROS_ERROR("Failed to convert to OcTree");
-    delete abstract_tree;
-    return cloud;
-  }
-  
-  ROS_INFO("OcTree created with resolution: %f and %lu nodes", 
-           octree->getResolution(), octree->size());
-  
-  // Create point cloud from OcTree
-  ROS_INFO("Converting OcTree to point cloud...");
-  cloud->header.frame_id = latest_octomap_.header.frame_id;
-  cloud->width = 0;  // Will increment as we add points
-  cloud->height = 1;
-  cloud->is_dense = false;
-  
-  // Iterate through the octree
-  unsigned int count = 0;
-  for (octomap::OcTree::leaf_iterator it = octree->begin_leafs(), end = octree->end_leafs(); it != end; ++it) {
-    // Only consider occupied voxels
-    if (octree->isNodeOccupied(*it)) {
-      // Get coordinates from OcTree node
-      float x = it.getX();
-      float y = it.getY();
-      float z = it.getZ();
-      
-      // Create a point
-      PointT point;
-      point.x = x;
-      point.y = y;
-      point.z = z;
-      
-      // Set default color (white) 
-      point.r = 255;
-      point.g = 255;
-      point.b = 255;
-      point.a = 255;
-      
-      // Add point to cloud
-      cloud->points.push_back(point);
-      cloud->width++;
-      
-      // Count points and provide progress updates
-      count++;
-      if (count % 10000 == 0) {
-        ROS_INFO("Processed %u points so far", count);
-      }
-    }
-  }
-  
-  ROS_INFO("Extracted %lu points from OctoMap", cloud->points.size());
-  
-  // Clean up
-  delete octree;
-  
-  // If we don't have enough points, return the empty cloud
-  if (cloud->points.size() < 100) {
-    ROS_WARN("Not enough points from OctoMap (%lu), returning empty cloud", 
-             cloud->points.size());
-    return cloud;
-  }
-  
-  // Apply voxel grid filter to downsample
-  ROS_INFO("Applying voxel grid filtering for downsampling...");
-  pcl::VoxelGrid<PointT> voxel_filter;
-  PointCPtr downsampled_cloud(new PointC);
-  voxel_filter.setInputCloud(cloud);
-  voxel_filter.setLeafSize(0.005f, 0.005f, 0.005f);  // 5mm voxel size
-  voxel_filter.filter(*downsampled_cloud);
-  
-  // Remove NaN points
-  std::vector<int> indices;
-  pcl::removeNaNFromPointCloud(*downsampled_cloud, *downsampled_cloud, indices);
-  
-  ROS_INFO("After voxel grid filtering: %lu points", downsampled_cloud->points.size());
-  
-  // Apply plane segmentation to remove the ground plane
-  ROS_INFO("Performing plane segmentation to remove floor...");
-  pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-  pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-  pcl::SACSegmentation<PointT> seg;
-  
-  // Configure the segmentation parameters
-  seg.setOptimizeCoefficients(true);
-  seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
-  seg.setMethodType(pcl::SAC_RANSAC);
-  seg.setDistanceThreshold(0.01); // 1cm threshold
-  seg.setMaxIterations(100);
-  
-  // Specify that we're looking for a plane perpendicular to the Z axis (ground plane)
-  Eigen::Vector3f axis(0.0, 0.0, 1.0);
-  seg.setAxis(axis);
-  seg.setEpsAngle(15.0 * (M_PI / 180.0)); // Allow 15 degrees deviation from Z axis
-  
-  // Perform the segmentation
-  seg.setInputCloud(downsampled_cloud);
-  seg.segment(*inliers, *coefficients);
-  
-  if (inliers->indices.size() > 0) {
-    // Extract everything except the plane (ground)
-    pcl::ExtractIndices<PointT> extract;
-    extract.setInputCloud(downsampled_cloud);
-    extract.setIndices(inliers);
-    extract.setNegative(true); // Extract everything EXCEPT the ground plane
-    
-    PointCPtr cloud_without_ground(new PointC);
-    extract.filter(*cloud_without_ground);
-    
-    ROS_INFO("Ground plane removed: kept %lu of %lu points", 
-             cloud_without_ground->points.size(), downsampled_cloud->points.size());
-    
-    // Replace downsampled_cloud with the filtered version
-    downsampled_cloud = cloud_without_ground;
-  } else {
-    ROS_WARN("No ground plane detected in the point cloud");
-  }
-  
-  ROS_INFO("====== POINT CLOUD EXTRACTION COMPLETED ======\n");
-  return downsampled_cloud;
-}
-
 // Helper function to get latest point cloud from a topic
 PointCPtr cw2::getLatestPointCloud(const std::string& topic, const std::string& target_frame) {
   ROS_INFO("Waiting for point cloud message from %s...", topic.c_str());
@@ -2367,7 +2061,7 @@ PointCPtr cw2::getLatestPointCloud(const std::string& topic, const std::string& 
   return cloud;
 }
 
-// New function for color filtering
+// Filter out green points
 PointCPtr cw2::filterPointCloudByColor(const PointCPtr& input_cloud) {
   ROS_INFO("Filtering point cloud by color...");
   PointCPtr cloud_color_filtered(new PointC);
@@ -2684,14 +2378,14 @@ PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
   PointCPtr final_cloud(new PointC);
   pcl::VoxelGrid<PointT> voxel_filter;
   voxel_filter.setInputCloud(merged_cloud);
-  voxel_filter.setLeafSize(t3_continuous_scan_voxel_size_, 
-                          t3_continuous_scan_voxel_size_, 
-                          t3_continuous_scan_voxel_size_);
+  voxel_filter.setLeafSize(t3_merge_voxel_size_, 
+                          t3_merge_voxel_size_, 
+                          t3_merge_voxel_size_);
   voxel_filter.filter(*final_cloud);
   
   // 打印降采样后的点云大小
   ROS_INFO("After final voxel filtering (%f mm): %zu points",
-           t3_continuous_scan_voxel_size_ * 1000.0, final_cloud->points.size());
+           t3_merge_voxel_size_ * 1000.0, final_cloud->points.size());
   
   return final_cloud;
 }
@@ -2746,7 +2440,7 @@ PointCPtr cw2::continuousScanSceneFromMultipleViewpoints() {
   ros::Duration(1.0).sleep();
   
   // Now execute each edge as a separate Cartesian path
-  float speed_factor = 0.05;
+  float speed_factor = 0.04;
   
   // Edge 1: Bottom edge (x from min to max, y = min)
   std::vector<geometry_msgs::Pose> edge1_waypoints;
@@ -3048,10 +2742,10 @@ float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& c
 
   // 从边缘向内缩10mm
   if (is_cross){
-    offset = max_dist / 2.0;
+    offset = max_dist / 2.0 - 0.01;
   }
   else {
-    offset = max_dist - 0.01;
+    offset = max_dist + t3_noughts_grasp_offset_;
   }
   
   ROS_INFO("Calculated grasp offset: %.1fmm (edge distance: %.1fmm, inset: 10mm)", 
