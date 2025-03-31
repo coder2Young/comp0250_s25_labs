@@ -144,7 +144,7 @@ cw2::cw2_config()
 
   // Task 3 specific parameters
   t3_scan_height_ = 0.65;           // Height for scanning the entire scene (lowered from 0.6)
-  t3_grasp_height_offset_ = -0.05;    // Add 10cm to Z coordinate of all grasp points to compensate for low point cloud values
+  t3_grasp_height_offset_ = -0.08;    // Add 10cm to Z coordinate of all grasp points to compensate for low point cloud values
 
   // Continuous scanning parameters
   t3_pointcloud_save_interval_ = 10;     // Process every 10th frame
@@ -423,7 +423,7 @@ bool cw2::planAndExecuteGrasp(
     const geometry_msgs::Point &object_point,
     const ObjectOrientationData &orientation_data,
     const std::string &shape_type,
-    float offset_override) {  // 添加可选的偏移值参数
+    float offset_override) {
   
   ROS_INFO("\n====== PLANNING AND EXECUTING GRASP ======");
   ROS_INFO("Object point: [%.4f, %.4f, %.4f]", 
@@ -580,8 +580,8 @@ bool cw2::planAndExecuteGrasp(
   // Standby position (grasp_stanby_height_ above grasp position)
   grasp_standby_pose.pose.position.x = grasp_x;
   grasp_standby_pose.pose.position.y = grasp_y;
-  grasp_standby_pose.pose.position.z = grasp_pose.pose.position.z + grasp_stanby_height_;
-  grasp_standby_pose.pose.orientation = grasp_pose.pose.orientation;
+  grasp_standby_pose.pose.position.z = object_point.z + hand_offset_ + grasp_stanby_height_;
+  grasp_standby_pose.pose.orientation = tf2::toMsg(q_final);
   
   ROS_INFO("Grasp standby pose: [%.4f, %.4f, %.4f] (%.4f above grasp position)",
            grasp_standby_pose.pose.position.x, 
@@ -589,11 +589,11 @@ bool cw2::planAndExecuteGrasp(
            grasp_standby_pose.pose.position.z,
            grasp_stanby_height_);
   
-  // Lift position (pick_lift_offset_ above ground)
+  // Lift position (pick_lift_offset_ above grasp position)
   lift_pose.pose.position.x = grasp_x;
   lift_pose.pose.position.y = grasp_y;
-  lift_pose.pose.position.z = object_point.z + pick_lift_offset_;
-  lift_pose.pose.orientation = grasp_pose.pose.orientation;
+  lift_pose.pose.position.z = object_point.z + hand_offset_ + pick_lift_offset_;
+  lift_pose.pose.orientation = tf2::toMsg(q_final);
   
   ROS_INFO("Lift pose: [%.4f, %.4f, %.4f] (%.4f above ground)",
            lift_pose.pose.position.x, 
@@ -601,9 +601,8 @@ bool cw2::planAndExecuteGrasp(
            lift_pose.pose.position.z,
            pick_lift_offset_);
   
-  // Store the final grasp orientation for place operation
-  current_grasp_orientation_ = grasp_pose.pose.orientation;
-  // Store the lift height for horizontal movement to place
+  // Store for place operation
+  current_grasp_orientation_ = tf2::toMsg(q_final);
   current_lift_height_ = lift_pose.pose.position.z;
   
   ROS_INFO("Stored lift height for place operation: %.4f", current_lift_height_);
@@ -614,92 +613,52 @@ bool cw2::planAndExecuteGrasp(
     ROS_INFO("Grasp visualization markers published");
   }
   
-  // Step 1: Move to grasp standby position
+  // Step 1: Move to standby position first 
   ROS_INFO("Moving to grasp standby position...");
   bool standby_success = moveArm(grasp_standby_pose);
   if (!standby_success) {
     ROS_ERROR("Failed to move to grasp standby position");
     return false;
   }
-  ROS_INFO("Successfully moved to grasp standby position");
   
-  // Step 2: Vertically move down to grasp position with constraints
-  ROS_INFO("Setting up vertical path constraints for grasp approach...");
+  // Step 2: 使用Cartesian路径规划从准备点垂直下降到抓取点
+  ROS_INFO("Planning Cartesian path for vertical approach to grasp...");
+  std::vector<geometry_msgs::Pose> vertical_waypoints;
+  vertical_waypoints.push_back(grasp_standby_pose.pose);  // 起点(当前位置)
+  vertical_waypoints.push_back(grasp_pose.pose);          // 终点(抓取位置)
   
-  // Add path constraint for vertical approach
-  moveit_msgs::Constraints constraints;
-  moveit_msgs::OrientationConstraint ocm;
-  ocm.header.frame_id = base_frame_;
-  ocm.link_name = arm_group_.getEndEffectorLink();
-  ocm.orientation = grasp_standby_pose.pose.orientation;
-  ocm.absolute_x_axis_tolerance = 0.1; // Very strict
-  ocm.absolute_y_axis_tolerance = 0.1; // Very strict
-  ocm.absolute_z_axis_tolerance = 0.1; // Very strict
-  ocm.weight = 1.0;
+  // 执行Cartesian路径
+  double eef_step = 0.001;       // 1cm步长
+  double jump_threshold = 0.0;  // 禁用跳跃阈值检查
+  double speed_factor = 0.1;    // 降低速度到20%，确保平稳下降
   
-  // Add position constraint to only allow Z-axis movement
-  moveit_msgs::PositionConstraint pcm;
-  pcm.header.frame_id = base_frame_;
-  pcm.link_name = arm_group_.getEndEffectorLink();
+  ROS_INFO("Executing vertical approach using Cartesian path (speed: %.1f%%)", speed_factor * 100);
+  bool cartesian_success = moveAlongCartesianPath(vertical_waypoints, eef_step, jump_threshold, speed_factor);
   
-  // Create a box constraint that only allows movement in Z direction
-  shape_msgs::SolidPrimitive box;
-  box.type = shape_msgs::SolidPrimitive::BOX;
-  box.dimensions.resize(3);
-  box.dimensions[0] = 0.002; // Small tolerance in X
-  box.dimensions[1] = 0.002; // Small tolerance in Y
-  box.dimensions[2] = 10;   // Allow movement in Z
-  
-  // Set the box position to allow vertical movement
-  geometry_msgs::Pose box_pose;
-  box_pose.position.x = grasp_standby_pose.pose.position.x;
-  box_pose.position.y = grasp_standby_pose.pose.position.y;
-  box_pose.position.z = (grasp_standby_pose.pose.position.z + grasp_pose.pose.position.z) / 2.0;
-  box_pose.orientation.w = 1.0;
-  
-  ROS_INFO("Path constraint box center: [%.4f, %.4f, %.4f]",
-           box_pose.position.x, box_pose.position.y, box_pose.position.z);
-  
-  pcm.constraint_region.primitives.push_back(box);
-  pcm.constraint_region.primitive_poses.push_back(box_pose);
-  pcm.weight = 1.0;
-  
-  constraints.orientation_constraints.push_back(ocm);
-  constraints.position_constraints.push_back(pcm);
-  
-  arm_group_.setPathConstraints(constraints);
-  
-  // Try with constraints
-  ROS_INFO("Moving down to grasp position with vertical constraints...");
-  bool grasp_approach_success = moveArm(grasp_pose);
-  
-  // Clear constraints for future movements
-  arm_group_.clearPathConstraints();
-  ROS_INFO("Path constraints cleared");
-  
-  if (!grasp_approach_success) {
-    ROS_ERROR("Failed to move to grasp position");
-    return false;
+  if (!cartesian_success) {
+    ROS_WARN("Failed to execute Cartesian approach to grasp, trying regular planning");
+    bool grasp_approach_success = moveArm(grasp_pose);
+    if (!grasp_approach_success) {
+      ROS_ERROR("Failed to move to grasp position");
+      return false;
+    }
   }
-  ROS_INFO("Successfully moved to grasp position");
   
   // Step 3: Close gripper to grasp object
-  ROS_INFO("Closing gripper to grasp object (width: %.4f)...", gripper_closed_);
+  ROS_INFO("Closing gripper to grasp object...");
   bool close_success = moveGripper(gripper_closed_, 2.0);
   if (!close_success) {
     ROS_ERROR("Failed to close gripper");
     return false;
   }
-  ROS_INFO("Gripper closed successfully");
   
   // Step 4: Lift object to higher position
-  ROS_INFO("Lifting object to travel height %.4f...", lift_pose.pose.position.z);
+  ROS_INFO("Lifting object to travel height...");
   bool lift_success = moveArm(lift_pose);
   if (!lift_success) {
     ROS_ERROR("Failed to move to lifting position");
     return false;
   }
-  ROS_INFO("Object lifted successfully to travel height");
   
   ROS_INFO("====== GRASP EXECUTION COMPLETED ======\n");
   return true;
@@ -707,8 +666,6 @@ bool cw2::planAndExecuteGrasp(
 
 bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
   ROS_INFO("\n====== PLANNING AND EXECUTING PLACE ======");
-  ROS_INFO("Place target point: [%.4f, %.4f, %.4f]", 
-           place_point.x, place_point.y, place_point.z);
   
   // Step 0: Calculate place positions
   geometry_msgs::PoseStamped place_standby_pose;
@@ -718,17 +675,10 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
   horizontal_move_pose.header.frame_id = base_frame_;
   
   // Place standby position (hand_offset_ + place_stanby_height_ above place position)
-  // This is where we'll release the object
   place_standby_pose.pose.position.x = place_point.x;
   place_standby_pose.pose.position.y = place_point.y;
   place_standby_pose.pose.position.z = place_point.z + hand_offset_ + place_stanby_height_;
   place_standby_pose.pose.orientation = current_grasp_orientation_;
-  
-  ROS_INFO("Place standby pose: [%.4f, %.4f, %.4f] (%.4f + %.4f above place point)",
-           place_standby_pose.pose.position.x, 
-           place_standby_pose.pose.position.y,
-           place_standby_pose.pose.position.z,
-           hand_offset_, place_stanby_height_);
   
   // Horizontal move position (same Z as current lift height)
   horizontal_move_pose.pose.position.x = place_point.x;
@@ -742,10 +692,6 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
            horizontal_move_pose.pose.position.z,
            current_lift_height_);
   
-  ROS_INFO("Using current grasp orientation for place: [%.4f, %.4f, %.4f, %.4f]",
-           current_grasp_orientation_.x, current_grasp_orientation_.y,
-           current_grasp_orientation_.z, current_grasp_orientation_.w);
-  
   // Step 1: Horizontal move to above place position (keeping Z at lift height)
   ROS_INFO("Moving horizontally to position above place point...");
   bool horizontal_move_success = moveArm(horizontal_move_pose);
@@ -753,71 +699,29 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
     ROS_ERROR("Failed to move horizontally to place area");
     return false;
   }
-  ROS_INFO("Successfully moved to position above place point");
   
-  // Step 2: Vertically move down to place standby position with constraints
-  ROS_INFO("Setting up vertical path constraints for place approach...");
+  // Step 2: 使用Cartesian路径垂直下降到放置准备位置
+  ROS_INFO("Planning Cartesian path for vertical descent to place standby...");
+  std::vector<geometry_msgs::Pose> vertical_waypoints;
+  vertical_waypoints.push_back(horizontal_move_pose.pose);  // 起点(当前位置)
+  vertical_waypoints.push_back(place_standby_pose.pose);    // 终点(放置准备位置)
   
-  // Add path constraint for vertical approach
-  moveit_msgs::Constraints constraints;
-  moveit_msgs::OrientationConstraint ocm;
-  ocm.header.frame_id = base_frame_;
-  ocm.link_name = arm_group_.getEndEffectorLink();
-  ocm.orientation = current_grasp_orientation_;
-  ocm.absolute_x_axis_tolerance = 0.01; // Very strict
-  ocm.absolute_y_axis_tolerance = 0.01; // Very strict
-  ocm.absolute_z_axis_tolerance = 0.01; // Very strict
-  ocm.weight = 1.0;
+  // 执行Cartesian路径
+  double eef_step = 0.001;       // 1cm步长
+  double jump_threshold = 0.0;  // 禁用跳跃阈值检查
+  double speed_factor = 0.1;    // 降低速度到20%，确保平稳下降
   
-  // Add position constraint to only allow Z-axis movement
-  moveit_msgs::PositionConstraint pcm;
-  pcm.header.frame_id = base_frame_;
-  pcm.link_name = arm_group_.getEndEffectorLink();
+  ROS_INFO("Executing vertical descent using Cartesian path (speed: %.1f%%)", speed_factor * 100);
+  bool cartesian_success = moveAlongCartesianPath(vertical_waypoints, eef_step, jump_threshold, speed_factor);
   
-  // Create a box constraint that only allows movement in Z direction
-  shape_msgs::SolidPrimitive box;
-  box.type = shape_msgs::SolidPrimitive::BOX;
-  box.dimensions.resize(3);
-  box.dimensions[0] = 0.002; // Small tolerance in X
-  box.dimensions[1] = 0.002; // Small tolerance in Y
-  box.dimensions[2] = 1.0;   // Allow movement in Z
-  
-  // Set the box position to allow vertical movement
-  geometry_msgs::Pose box_pose;
-  box_pose.position.x = place_point.x;
-  box_pose.position.y = place_point.y;
-  box_pose.position.z = (horizontal_move_pose.pose.position.z + place_standby_pose.pose.position.z) / 2.0;
-  box_pose.orientation.w = 1.0;
-  
-  ROS_INFO("Place path constraint box center: [%.4f, %.4f, %.4f]",
-           box_pose.position.x, box_pose.position.y, box_pose.position.z);
-  
-  pcm.constraint_region.primitives.push_back(box);
-  pcm.constraint_region.primitive_poses.push_back(box_pose);
-  pcm.weight = 1.0;
-  
-  constraints.orientation_constraints.push_back(ocm);
-  constraints.position_constraints.push_back(pcm);
-  
-  arm_group_.setPathConstraints(constraints);
-  
-  // Try with constraints to move to place standby
-  ROS_INFO("Moving down to place standby position with vertical constraints...");
-  bool place_standby_success = moveArm(place_standby_pose);
-  
-  // Clear constraints
-  arm_group_.clearPathConstraints();
-  ROS_INFO("Place path constraints cleared");
-  
-  if (!place_standby_success) {
-    ROS_WARN("Failed to move to place standby with constraints, trying without constraints");
-    place_standby_success = moveArm(place_standby_pose);
+  if (!cartesian_success) {
+    ROS_WARN("Failed to execute Cartesian approach to place standby, trying regular planning");
+    bool place_standby_success = moveArm(place_standby_pose);
     if (!place_standby_success) {
       ROS_ERROR("Failed to move to place standby position");
       return false;
     }
   }
-  ROS_INFO("Successfully moved to place standby position");
   
   // Step 3: Open gripper to release object at standby position
   ROS_INFO("Opening gripper to release object (width: %.4f)...", gripper_open_);
@@ -826,7 +730,6 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
     ROS_ERROR("Failed to open gripper");
     return false;
   }
-  ROS_INFO("Gripper opened successfully");
   
   // Pause briefly to allow object to fall
   ROS_INFO("Pausing for 0.5 seconds to allow object to fall...");
@@ -1889,7 +1792,7 @@ bool cw2::graspAndPlaceObjectsOfType(
     }
     
     // Increment stack height for next object
-    current_stack_height += 0.03; // Add 3cm for each stacked object
+    current_stack_height += 0.05; // Add 3cm for each stacked object
     objects_grasped++;
     
     ROS_INFO("Successfully grasped and placed object %zu", i);
@@ -2776,7 +2679,7 @@ PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
   
   // 打印合并后的点云大小
   ROS_INFO("Merged %zu clouds with total %zu points", clouds.size(), merged_cloud->points.size());
-  
+
   // 使用t3_continuous_scan_voxel_size_进行最终的体素降采样
   PointCPtr final_cloud(new PointC);
   pcl::VoxelGrid<PointT> voxel_filter;
@@ -3141,8 +3044,15 @@ float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& c
     return default_offset;
   }
   
+  float offset;
+
   // 从边缘向内缩10mm
-  float offset = max_dist - 0.01; // 10mm内缩
+  if (is_cross){
+    offset = max_dist / 2.0;
+  }
+  else {
+    offset = max_dist - 0.01;
+  }
   
   ROS_INFO("Calculated grasp offset: %.1fmm (edge distance: %.1fmm, inset: 10mm)", 
            offset * 1000.0, max_dist * 1000.0);
