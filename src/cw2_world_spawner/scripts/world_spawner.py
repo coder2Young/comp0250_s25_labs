@@ -84,10 +84,10 @@ T2_USE_MULTIPLE_SIZES = False            # do we spawn objects with varying size
 T3_MAX_SHAPES = 7                        # maximum number of spawned shapes
 T3_SHAPE_X_LIMS = [-0.6, 0.7]            # xrange a shape can spawn
 T3_SHAPE_Y_LIMS = [-0.55, 0.55]          # yrange a shape can spawn
-T3_N_OBSTACLES = 2
-T3_ANY_ORIENTATION = False               # do we allow any rotation of a shape
+T3_N_OBSTACLES = 3
+T3_ANY_ORIENTATION = True               # do we allow any rotation of a shape
 T3_GROUND_PLANE_NOISE = 0e-3             # do we add noise on the z height of the green tiles
-T3_USE_MULTIPLE_SIZES = False            # do we spawn objects with varying sizes
+T3_USE_MULTIPLE_SIZES = True            # do we spawn objects with varying sizes
 
 # possible goal basket locations (x, y)
 BASKET_LOCATIONS = [(-0.41, -0.36), 
@@ -277,7 +277,7 @@ class Task1(Task):
     # spawn a random object
     colour_options = list(POSSIBLE_COLOURS.keys())
     rand_colour = np.random.choice(colour_options)
-    rand_object = np.random.choice(POSSIBLE_SHAPES)
+    rand_object = "nought"
     if T1_USE_MULTIPLE_SIZES:
       rand_size = np.random.choice(POSSIBLE_SIZES)
     else: rand_size = POSSIBLE_SIZES[0]
@@ -287,7 +287,8 @@ class Task1(Task):
                      ylims=T1_SHAPE_Y_LIMS)
 
     # save the name of the object
-    self.object_type = rand_object
+    # Temporarily set to nought, for testing
+    self.object_type = "nought"
     
     # spawn a goal basket
     random_goal = BASKET_LOCATIONS[np.random.random_integers(0, len(BASKET_LOCATIONS)) - 1]
