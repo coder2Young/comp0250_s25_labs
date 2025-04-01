@@ -95,15 +95,15 @@ cw2::cw2_config()
 
   // Continuous scanning parameters
   t3_pointcloud_save_interval_ = 10;     // Process every 10th frame
-  t3_continuous_scan_voxel_size_ = 0.002; // 2mm voxel size for downsampling
+  t3_continuous_scan_voxel_size_ = 0.001; // 2mm voxel size for downsampling
   t3_merge_voxel_size_ = 0.001; // 1mm voxel for merged cloud
   
   t3_cross_grasp_offset_base_ = 0.01;
-  t3_nought_grasp_offset_base_ = 0.005;
+  t3_nought_grasp_offset_base_ = -0.01;
   // Euclidean clustering parameters
-  t3_cluster_tolerance_ = 0.005;    // 2mm tolerance between points in cluster
+  t3_cluster_tolerance_ = 0.002;    // 2mm tolerance between points in cluster
   t3_min_cluster_size_ = 500; 
-  t3_max_cluster_size_ = 50000;
+  t3_max_cluster_size_ = 100000;
 
   return;
 }
@@ -2191,8 +2191,6 @@ PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
                           t3_merge_voxel_size_, 
                           t3_merge_voxel_size_);
   voxel_filter.filter(*final_cloud);
-  
-  // 打印降采样后的点云大小
   ROS_INFO("After final voxel filtering (%f mm): %zu points",
            t3_merge_voxel_size_ * 1000.0, final_cloud->points.size());
   
@@ -2208,9 +2206,8 @@ PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
 PointCPtr cw2::continuousScanSceneFromMultipleViewpoints() {
   ROS_INFO("Starting continuous scanning motion...");
   
-
-  
   // Define rectangular path parameters
+  // Predefined rectangular path, no need to change
   float rect_x_min = -0.45;
   float rect_x_max = 0.45;
   float rect_y_min = -0.35;
