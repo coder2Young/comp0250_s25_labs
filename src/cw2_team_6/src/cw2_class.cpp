@@ -1127,7 +1127,7 @@ geometry_msgs::Point cw2::findBasketCenter(const PointCPtr& basket_cloud) {
     publishPointCloud(colored_clusters, cloud_filtered_pub_);
   }
   
-  // 从最大簇中计算质心
+  // Calculate centroid of the largest cluster
   PointCPtr largest_cluster(new PointC);
   for (const auto& idx : cluster_indices[max_idx].indices) {
     largest_cluster->points.push_back(downsampled_cloud->points[idx]);
@@ -1140,7 +1140,7 @@ geometry_msgs::Point cw2::findBasketCenter(const PointCPtr& basket_cloud) {
   Eigen::Vector4f centroid;
   pcl::compute3DCentroid(*largest_cluster, centroid);
   
-  // 创建并返回篮子中心点
+  // Create a point for the basket center
   geometry_msgs::Point basket_center;
   basket_center.x = centroid[0];
   basket_center.y = centroid[1];
@@ -1319,11 +1319,11 @@ bool cw2::clusterAndClassifyObjects(
     return false;
   }
   
-  // 创建一个全局的彩色点云，用于可视化所有聚类
+  // Create a point cloud to visualize all clusters
   PointCPtr all_clusters_cloud(new PointC);
-  all_clusters_cloud->reserve(objects_cloud->points.size()); // 预分配空间
+  all_clusters_cloud->reserve(objects_cloud->points.size()); // Preallocate memory
   
-  // 创建一个PCA轴的集合，用于可视化
+  // Create a marker array for PCA axes visualization
   visualization_msgs::MarkerArray all_pca_axes;
   
   // Process each cluster
@@ -1372,7 +1372,7 @@ bool cw2::clusterAndClassifyObjects(
     uint8_t g = 50 + ((i * 70) % 200);
     uint8_t b = 50 + ((i * 90) % 200);
     
-    // 更亮的颜色表示十字, 更暗的颜色表示圆环
+    // Brighten colors for cross shapes，darken for nought shapes
     if (is_cross) {
       r = std::min(255, int(r * 1.5));
       g = std::min(255, int(g * 1.5));
@@ -1398,17 +1398,17 @@ bool cw2::clusterAndClassifyObjects(
     }
   }
   
-  // 设置合并点云的属性
+  // Set the header for the visualization cloud
   all_clusters_cloud->width = all_clusters_cloud->points.size();
   all_clusters_cloud->height = 1;
   all_clusters_cloud->is_dense = false;
   
-  // 发布可视化
+  // Publish the clustered point cloud for visualization
   if (debug_) {
-    // 一次性发布所有聚类点云
+    // Publish the clustered point cloud
     publishPointCloud(all_clusters_cloud, clusters_pub_);
     
-    // 发布所有PCA轴
+    // Publish the PCA axes markers
     all_pca_axes_pub_.publish(all_pca_axes);
     
     ROS_INFO("Published visualization of %zu clusters with PCA axes", cluster_indices.size());
@@ -1450,11 +1450,11 @@ visualization_msgs::MarkerArray cw2::createPCAAxesMarkers(
   primary_marker.pose.orientation.z = q.z();
   primary_marker.pose.orientation.w = q.w();
   
-  primary_marker.scale.x = 0.1;  // 轴长
-  primary_marker.scale.y = 0.01; // 轴宽
-  primary_marker.scale.z = 0.01; // 轴高
+  primary_marker.scale.x = 0.1;  
+  primary_marker.scale.y = 0.01; 
+  primary_marker.scale.z = 0.01; 
   
-  // 为不同形状设置不同颜色
+  // Set color based on shape type
   if (shape_type == "cross") {
     primary_marker.color.r = 1.0;
     primary_marker.color.g = 0.0;
@@ -1467,9 +1467,6 @@ visualization_msgs::MarkerArray cw2::createPCAAxesMarkers(
   primary_marker.color.a = 1.0;
   
   marker_array.markers.push_back(primary_marker);
-  
-  // 类似地创建次轴和第三轴标记...
-  // (省略部分代码以保持简洁)
   
   return marker_array;
 }
@@ -1493,37 +1490,37 @@ float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& c
   
   float max_dist = 0.0f;
   
-  // 使用正确的抓取轴，直接从orientation_data中获取
+  // Use the centroid to calculate the grasp offset
   Eigen::Vector3f grasp_axis;
   if (is_cross) {
-    // 对于cross，使用主轴方向
+    // Use primary axis for cross
     grasp_axis = orientation_data.primary_axis;
   } else {
-    // 对于nought，使用edge_direction（如果已计算）或计算中点方向
+    //  Use edge direction for nought
     if (orientation_data.edge_direction.norm() > 0.01) {
       grasp_axis = orientation_data.edge_direction;
     } else {
-      // 如果edge_direction未被设置，则使用primary和secondary轴来计算中点方向
+      // Calculate the angle between primary and secondary axes if edge direction is not valid
       float primary_angle = atan2(orientation_data.primary_axis[1], 
                                  orientation_data.primary_axis[0]);
       float secondary_angle = atan2(orientation_data.secondary_axis[1], 
                                    orientation_data.secondary_axis[0]);
       
-      // 处理角度差
+      // Handle angle wrapping
       float angle_diff = secondary_angle - primary_angle;
       if (angle_diff > M_PI) angle_diff -= 2*M_PI;
       if (angle_diff < -M_PI) angle_diff += 2*M_PI;
       
       float midpoint_angle = primary_angle + angle_diff/2.0;
       
-      // 中点角度方向
+      // Calculate the grasp axis based on the midpoint angle
       grasp_axis[0] = cos(midpoint_angle);
       grasp_axis[1] = sin(midpoint_angle);
       grasp_axis[2] = 0.0;
     }
   }
   
-  // 计算沿抓取轴的最大投影距离
+  // Calculate the maximum distance from the centroid along the grasp axis
   for (const auto& point : object_cloud->points) {
     Eigen::Vector3f point_vector(point.x - centroid[0], 
                                  point.y - centroid[1], 
@@ -1606,11 +1603,11 @@ bool cw2::graspAndPlaceObjectsOfType(
     object_center.z = centroid[2];
     object_center.z += t3_grasp_height_offset_;
     
-    // 计算最佳抓取偏移量，直接使用orientation_data而不重新计算
+    // Calculate grasp offset based on object shape and orientation
     float grasp_offset = calculateGraspOffset(
         object_clusters[i], 
         centroid, 
-        object_orientations[i],  // 直接传递完整的orientation_data
+        object_orientations[i],  // use the pre-calculated orientation data
         is_cross_shape[i]);
     
     // Execute the grasp with calculated offset
