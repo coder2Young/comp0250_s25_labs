@@ -1,6 +1,8 @@
-Authors: Eddie Edwards (eddie.edwards@ucl.ac.uk), Kefeng Huang, Bowie (Heiyin) Wong, Dimitrios Kanoulas, Luke Beddow, Denis Hadjivelichkov
+### Comp0250 Coursework 2 Team 6
 
-Description: This package forms the base ROS workspace for the module COMP0250 (formerly COMP0129): Robotic Sensing, Manipulation and Interaction.
+Authors: Lucas Young, Sonny Mo
+
+Description: Coursework 2 - Pick and Place, Object Detection and Localization
 
 ## Pre-Requisites
 ```bash
