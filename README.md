@@ -38,14 +38,14 @@ roslaunch cw2_team_6 run_solution.launch
 ## Run solutions run each task
 The specific tasks should be launched from a separate terminal that has also been sourced
 
-### Task 1 - (Lucas %, Sonny % hours)
+### Task 1 - (Lucas %, Sonny % , hours in total)
 Given the position of the basket and the shape, a point cloud of the object is captured. The major axis of the object is extracted by PCA from the point cloud to determine its orientation. The goal is to pick up the shape and place it into the brown basket.
 
 To run the task:
 ```bash
 rosservice call /task 1
 ```
-### Task 2 - (Lucas %, Sonny % hours)
+### Task 2 - (Lucas %, Sonny % hours in total)
 Given two reference shapes and one mystery shape, the manipulator analyzes the scene and determines which reference shape matches the mystery shape.
 
 To run the task:
@@ -61,7 +61,7 @@ The identified shapes are outputted in the ROS console as such:
 [ INFO] [1743889837.305624743, 338.589000000]: Mystery object shape: CROSS
 ```
 
-### Task 3 - (Lucas %, Sonny % hours)
+### Task 3 - (Lucas %, Sonny % hours in total)
 Task Objectives:
 - Count the total number of objects, excluding the black obstacles.
 - Identify which shape appears most frequently (or determine if there's a tie).
@@ -79,7 +79,7 @@ The identified total shapes are outputted in the ROS console as such:
 ```
 
 ## License
-Github Repo: https://github.com/colinlaganier/COMP0129-CW3
+Github Repo: [https://github.com/colinlaganier/COMP0129-CW3](https://github.com/coder2Young/comp0250_s25_labs.git)
 
 This project is [MIT](LICENSE) licensed.
 
