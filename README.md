@@ -75,7 +75,6 @@ The identified total shapes and the most common shape count are outputted in the
 Based on multiple trials, the task achieved a success rate of approximately 80%.
 
 ## License
-Github Repo: [https://github.com/colinlaganier/COMP0129-CW3](https://github.com/coder2Young/comp0250_s25_labs.git)
+Github Repo: [https://github.com/coder2Young/comp0250_s25_labs](https://github.com/coder2Young/comp0250_s25_labs.git)
 
 This project is [MIT](LICENSE.txt) licensed.
-
