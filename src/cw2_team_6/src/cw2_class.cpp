@@ -6,6 +6,8 @@ solution is contained within the cw2_team_<your_team_number> package */
 #include <cw2_class.h> // change to your team name here!
 
 ///////////////////////////////////////////////////////////////////////////////
+// Constructor
+///////////////////////////////////////////////////////////////////////////////
 
 cw2::cw2(ros::NodeHandle nh):
   tf_buffer_(),
@@ -14,12 +16,12 @@ cw2::cw2(ros::NodeHandle nh):
   arm_group_("panda_arm"),
   hand_group_("hand") // Not config, just instantiate
 {
-  /* class constructor */
+  /* Class constructor */
   nh_ = nh;
 
   cw2_config();
 
-  // advertise solutions for coursework tasks
+  // Advertise services for coursework tasks
   t1_service_  = nh_.advertiseService("/task1_start", 
     &cw2::t1_callback, this);
   t2_service_  = nh_.advertiseService("/task2_start", 
@@ -27,15 +29,15 @@ cw2::cw2(ros::NodeHandle nh):
   t3_service_  = nh_.advertiseService("/task3_start",
     &cw2::t3_callback, this);
 
-  // Sub for task3, continous scan for the whole scene
+  // Subscriber for task 3, continuous scan for the entire scene
   cloud_sub_ = nh_.subscribe("/r200/camera/depth_registered/points", 1, &cw2::continuousScanCloudCallback, this);
 
-  // Set the initial collection state to false
-  // This is a switch, not a config
+  // Set the initial state for cloud collection to false
+  // This is a switch, not a configuration
   is_collecting_clouds_ = false;
   cloud_frame_counter_ = 0;
 
-  // Add floor collision object to prevent collisions with the ground
+  // Add a floor collision object to prevent collisions with the ground
   addFloorCollisionObject();
 
   // Initialize visualization publishers for debugging with latched mode
@@ -51,7 +53,7 @@ cw2::cw2(ros::NodeHandle nh):
     all_pca_axes_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("/debug/all_pca_axes", 1, true);
   }
 
-  ROS_INFO("cw2 class initialised");
+  ROS_INFO("cw2 class initialized");
   return;
 }
 
@@ -1611,7 +1613,7 @@ if (object_clusters.size() != 1) {
   ROS_WARN("Expected exactly 1 object to grasp, but got %zu", object_clusters.size());
 }
 
-// 只处理第一个（也是唯一一个）物体
+// Check if the largest object matches the expected type
 size_t i = 0;
 if (is_cross_shape[i] != grasp_cross_shape) {
   ROS_ERROR("Object shape does not match expected type");
