@@ -81,5 +81,5 @@ The identified total shapes are outputted in the ROS console as such:
 ## License
 Github Repo: [https://github.com/colinlaganier/COMP0129-CW3](https://github.com/coder2Young/comp0250_s25_labs.git)
 
-This project is [MIT](LICENSE) licensed.
+This project is [MIT](LICENSE.txt) licensed.
 
