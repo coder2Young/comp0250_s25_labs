@@ -32,14 +32,14 @@ roslaunch cw2_team_6 run_solution.launch
 ## Run solutions run each task
 The specific tasks should be launched from a separate terminal that has also been sourced
 
-### Task 1 - (Lucas %, Sonny % , hours in total)
+### Task 1 - (Lucas 50%, Sonny 50% , 12 hours in total)
 Given the position of the basket and the shape, a point cloud of the object is captured. The major axis of the object is extracted by PCA from the point cloud to determine its orientation. The goal is to pick up the shape and place it into the brown basket.
 
 To run the task:
 ```bash
 rosservice call /task 1
 ```
-### Task 2 - (Lucas %, Sonny %, hours in total)
+### Task 2 - (Lucas 50%, Sonny 50%, 16 hours in total)
 Given two reference shapes and one mystery shape, the manipulator analyzes the scene and determines which reference shape matches the mystery shape.
 
 To run the task:
@@ -55,7 +55,7 @@ The identified shapes are outputted in the ROS console as such:
 [ INFO] [1743889837.305624743, 338.589000000]: Mystery object shape: CROSS
 ```
 
-### Task 3 - (Lucas %, Sonny %, hours in total)
+### Task 3 - (Lucas 70%, Sonny 30%, 80 hours in total)
 Task Objectives:
 - Count the total number of objects, excluding the black obstacles.
 - Identify which shape appears most frequently (or determine if there's a tie).
