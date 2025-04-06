@@ -1,22 +1,30 @@
-# Comp0250 Coursework 2 Team 6
+Authors: Eddie Edwards (eddie.edwards@ucl.ac.uk), Kefeng Huang, Bowie (Heiyin) Wong, Dimitrios Kanoulas, Luke Beddow, Denis Hadjivelichkov
 
-Authors: Lucas Young, Sonny Mo
-
-Description: Coursework 2 - Pick and Place, Object Detection and Localization
+Description: This package forms the base ROS workspace for the module COMP0250 (formerly COMP0129): Robotic Sensing, Manipulation and Interaction.
 
 ## Pre-Requisites
-
-To run this task following environment/packages are required: 
-- ROS Noetic
-- Gazebo
-- Point Cloud Library
-- MoveIt
-- tf2
-- Octomap
+```bash
+sudo apt install ros-noetic-franka-ros ros-noetic-libfranka
+```
+Gazebo physics simluator is also needed (http://gazebosim.org/). This can be installed and then run with:
+```bash
+curl -sSL http://get.gazebosim.org | sh
+gazebo
+```
 
 ## Installation
-Download the repository and place it in the `src` directory of your Catkin workspace.
-Then, open a terminal and build the package using the following command:
+```bash
+git clone --recurse-submodules https://github.com/surgical-vision/comp0250_s25_labs.git
+```
+```bash
+cd comp0250_s25_labs
+```
+```bash
+git submodule update --init --recursive
+```
+```bash
+catkin config --extend /opt/ros/${ROS_DISTRO} --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
 ```bash
 catkin build
 ```
@@ -26,55 +34,32 @@ catkin build
 source devel/setup.bash
 ```
 ```bash
-roslaunch cw2_team_6 run_solution.launch
+roslaunch panda_description description.launch
 ```
 
-## Run solutions run each task
-The specific tasks should be launched from a separate terminal that has also been sourced
-
-### Task 1 - (Lucas 50%, Sonny 50% , 12 hours in total)
-Given the position of the basket and the shape, a point cloud of the object is captured. The major axis of the object is extracted by PCA from the point cloud to determine its orientation. The goal is to pick up the shape and place it into the brown basket.
-
-To run the task:
+## Package Preparation (not to be ran by students):
 ```bash
-rosservice call /task 1
+mkdir src
+git submodule add https://github.com/COMP0129-UCL/panda_moveit_config.git src/panda_moveit_config
+git submodule add https://github.com/COMP0129-UCL/panda_description.git src/panda_description
+git submodule add https://github.com/RPL-CS-UCL/realsense_gazebo_plugin.git src/realsense_gazebo_plugin 
+git submodule add https://github.com/RPL-CS-UCL/rpl_panda_with_rs.git src/rpl_panda_with_rs
 ```
-### Task 2 - (Lucas 50%, Sonny 50%, 16 hours in total)
-Given two reference shapes and one mystery shape, the manipulator analyzes the scene and determines which reference shape matches the mystery shape.
-
-To run the task:
-```bash
-rosservice call /task 2
-```
-The identified shapes are outputted in the ROS console as such:
-```console
-=================TASK 2 RESULT=================
-[ INFO] [1743889837.305583744, 338.589000000]: The mystery object matches reference object 2
-[ INFO] [1743889837.305597834, 338.589000000]: Reference object 1 shape: NOUGHT
-[ INFO] [1743889837.305611571, 338.589000000]: Reference object 2 shape: CROSS
-[ INFO] [1743889837.305624743, 338.589000000]: Mystery object shape: CROSS
-```
-
-### Task 3 - (Lucas 70%, Sonny 30%, 80 hours in total)
-Task Objectives:
-- Count the total number of objects, excluding the black obstacles.
-- Identify which shape appears most frequently (or determine if there's a tie).
-- Pick up and place one instance of the most common shape into the basket, while advoiding obstacles.
-
-To run the task:
-```bash
-rosservice call /task 3
-```
-
-The identified total shapes and the most common shape count are outputted in the ROS console as such:
-```console
-====== TASK 3 COMPLETED ======
-[ INFO] [1743890238.553513906, 151.865000000]: Total shapes: 6, Most common shape count: 4
-```
-
-Based on multiple trials, the task achieved a success rate of approximately 80%.
 
 ## License
-Github Repo: [https://github.com/coder2Young/comp0250_s25_labs](https://github.com/coder2Young/comp0250_s25_labs.git)
+LICENSE: MIT.  See [LICENSE.txt](LICENSE.txt)
 
-This project is [MIT](LICENSE.txt) licensed.
+DISCLAIMER:
+
+THIS INFORMATION AND/OR SOFTWARE IS PROVIDED BY THE AUTHOR "AS IS" AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS INFORMATION AND/OR
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Copyright (C) 2019-2024 Dimitrios Kanoulas and Eddie Edwards except where specified

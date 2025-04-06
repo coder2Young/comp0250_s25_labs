@@ -1,0 +1,88 @@
+# Comp0250 Coursework 2 Team 6
+
+Authors: Lucas Yang, Sonny Mo
+
+Description: Coursework 2 - Pick and Place, Object Detection and Localization
+
+## Pre-Requisites
+
+To run this task following environment/packages are required: 
+- ROS Noetic
+- Gazebo
+- Point Cloud Library
+- MoveIt
+- tf2
+- Octomap
+
+## Installation
+Download the repository and place it in the `src` directory of your Catkin workspace.
+Then, open a terminal and build the package using the following command:
+```bash
+catkin build
+```
+
+## Run Panda robot Gazebo and rviz
+```bash
+source devel/setup.bash
+```
+```bash
+roslaunch cw2_team_6 run_solution.launch
+```
+
+## Run solutions run each task
+The specific tasks should be launched from a separate terminal that has also been sourced
+
+### Task 1 - (Lucas 50%, Sonny 50% , 12 hours in total)
+Given the position of the basket and the shape, a point cloud of the object is captured. The major axis of the object is extracted by PCA from the point cloud to determine its orientation. The goal is to pick up the shape and place it into the brown basket.
+
+To run the task:
+```bash
+rosservice call /task 1
+```
+### Task 2 - (Lucas 50%, Sonny 50%, 16 hours in total)
+Given two reference shapes and one mystery shape, the manipulator analyzes the scene and determines which reference shape matches the mystery shape.
+
+To determine the object's shape, a sphere is defined at its center. If the object's point cloud appears within the sphere (indicating a solid interior), it is classified as Cross-type; otherwise, it is Nought-type.
+
+To run the task:
+```bash
+rosservice call /task 2
+```
+The identified shapes are outputted in the ROS console as such:
+```console
+=================TASK 2 RESULT=================
+[ INFO] [1743889837.305583744, 338.589000000]: The mystery object matches reference object 2
+[ INFO] [1743889837.305597834, 338.589000000]: Reference object 1 shape: NOUGHT
+[ INFO] [1743889837.305611571, 338.589000000]: Reference object 2 shape: CROSS
+[ INFO] [1743889837.305624743, 338.589000000]: Mystery object shape: CROSS
+```
+
+### Task 3 - (Lucas 70%, Sonny 30%, 80 hours in total)
+Task Objectives:
+- Count the total number of objects, excluding the black obstacles.
+- Identify which shape appears most frequently (or determine if there's a tie).
+- Pick up and place one instance of the most common shape into the basket, while advoiding obstacles.
+
+The robotic arm scans the entire scene with its end-effector facing downward, then performs point cloud fusion, filtering, and classification. Color information is used to distinguish between the basket, obstacles, and the target objects for grasping. The shape identification method from Task 2 is applied to classify the target objects, ultimately generating scanning results that include their quantity and shape.
+
+Next, PCA in Task1 is used to analyze the largest object for grasp planning, determining the grasp pose. The robotic arm then executes the grasping operation.
+
+To run the task:
+```bash
+rosservice call /task 3
+```
+
+The identified total shapes and the most common shape count are outputted in the ROS console as such:
+```console
+====== TASK 3 COMPLETED ======
+[ INFO] [1743890238.553513906, 151.865000000]: Total shapes: 6, Most common shape count: 4
+```
+
+Based on multiple experiments, the task achieves 100% accuracy in judging the quantity and shape of objects. However, due to the complexity of the scene, the PCA-based grasp pose analysis is not that accurate, resulting in a certain probability of failure in the grasping task, with a success rate of 80%.
+
+## License
+Github Repo: [https://github.com/coder2Young/comp0250_s25_labs](https://github.com/coder2Young/comp0250_s25_labs.git)
+
+Branch: dev_cw2
+
+This project is [MIT](LICENSE.txt) licensed.

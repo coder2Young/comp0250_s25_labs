@@ -59,13 +59,13 @@ cw2::cw2_config()
   ROS_INFO("Configuring the robot for the coursework");
 
   // Enable debug mode
-  debug_ = true;
+  debug_ = false; // IMPORTANT: Disable debug mode for testing to improve performance
   if (debug_){
     ROS_INFO("Debug mode enabled");
   }
 
   // Basic pick and place parameters
-  hand_offset_ = 0.15; // 0.15 default
+  hand_offset_ = 0.15; // 150mm default
   gripper_open_ = 0.08; // 80mm
   gripper_closed_ = 0.0;
   grasp_stanby_height_ = 0.15;
@@ -114,7 +114,6 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   cw2_world_spawner::Task1Service::Response &response) 
 {
   /* Task 1: Implementation for object grasping with orientation detection */
-
   ROS_INFO("\n\n====== TASK 1 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
   
@@ -181,7 +180,7 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   if (debug_) {
     publishPointCloud(processed_cloud, cloud_filtered_pub_);
   }
-    // 5. Determine object orientation using PCA
+    // 4. Determine object orientation using PCA
   ObjectOrientationData orientation_data = determineObjectOrientation(processed_cloud, shape_type);
   
   if (!orientation_data.is_valid) {
@@ -189,7 +188,7 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
     return false;
   }
   
-  // 6. Plan and execute grasp
+  // 5. Plan and execute grasp
   bool grasp_success = planAndExecuteGrasp(object_point.point, orientation_data, shape_type);
   
   if (!grasp_success) {
@@ -214,7 +213,6 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   cw2_world_spawner::Task2Service::Response &response)
 {
   /* Task 2: Implementation for shape recognition between cross and nought shapes */
-
   ROS_INFO("\n\n====== TASK 2 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 2 has been triggered");
 
@@ -294,7 +292,7 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
     ROS_INFO("%s is a %s shape", object_name.c_str(), is_cross ? "CROSS" : "NOUGHT");
   }
 
-  // Determine which reference object matches the mystery object
+  // 5. Determine which reference object matches the mystery object
   int mystery_object_num = 0;
   if (is_cross_shape.size() == 3) {  // Ensure we have all three shapes
     if (is_cross_shape[2] == is_cross_shape[0]) {
@@ -312,7 +310,7 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
     mystery_object_num = 1;
   }
 
-  // Set the response
+  // 6. Set the response and print the result
   response.mystery_object_num = mystery_object_num;
   
   ROS_INFO("\n=================TASK 2 RESULT=================");
@@ -330,132 +328,134 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
 }
 
 
-bool cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
-  cw2_world_spawner::Task3Service::Response &response) {
-ROS_INFO("\n\n====== TASK 3 STARTED ======\n");
-ROS_INFO("The coursework solving callback for task 3 has been triggered");
+bool 
+cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request, 
+    cw2_world_spawner::Task3Service::Response &response) {
+  ROS_INFO("\n\n====== TASK 3 STARTED ======\n");
+  ROS_INFO("The coursework solving callback for task 3 has been triggered");
 
-if (debug_) {
-ROS_INFO("Debug mode is enabled - will provide extended logging");
-}
+  if (debug_) {
+    ROS_INFO("Debug mode is enabled - will provide extended logging");
+  }
 
-// Variables to store results
-int total_num_shapes = 0;
-int num_cross_shapes = 0;
-int num_nought_shapes = 0;
+  // Variables to store results
+  int total_num_shapes = 0;
+  int num_cross_shapes = 0;
+  int num_nought_shapes = 0;
 
-// 1. Scan the scene from multiple viewpoints and merge the point clouds
-ROS_INFO("====== SCANNING SCENE  ======");
-PointCPtr merged_cloud = continuousScanSceneFromMultipleViewpoints();
+  // 1. Scan the scene from multiple viewpoints and merge the point clouds
+  ROS_INFO("====== SCANNING SCENE  ======");
+  PointCPtr merged_cloud = continuousScanSceneFromMultipleViewpoints();
 
-if (merged_cloud->empty()) {
-ROS_ERROR("Failed to get valid point cloud data from scanning");
-return false;
-}
+  if (merged_cloud->empty()) {
+    ROS_ERROR("Failed to get valid point cloud data from scanning");
+    return false;
+  }
 
-// 2. Extract brown basket for placement
-PointCPtr basket_cloud = extractBrownBasket(merged_cloud);
-geometry_msgs::Point basket_center = findBasketCenter(basket_cloud);
-ROS_INFO("Basket center found at: [%f, %f, %f]", basket_center.x, basket_center.y, basket_center.z);
+  // 2. Extract brown basket for placement
+  PointCPtr basket_cloud = extractBrownBasket(merged_cloud);
+  geometry_msgs::Point basket_center = findBasketCenter(basket_cloud);
+  ROS_INFO("Basket center found at: [%f, %f, %f]", basket_center.x, basket_center.y, basket_center.z);
 
-// 3. Extract black obstacles for collision avoidance
-PointCPtr obstacles_cloud = extractBlackObstacles(merged_cloud);
-addObstaclesToPlanningScene(obstacles_cloud);
-addFloorCollisionObject();
+  // 3. Extract black obstacles for collision avoidance
+  PointCPtr obstacles_cloud = extractBlackObstacles(merged_cloud);
+  addObstaclesToPlanningScene(obstacles_cloud);
+  addFloorCollisionObject();
 
-// 4. Extract the remaining colored objects (red, blue, purple)
-PointCPtr objects_cloud = extractGraspableObjects(merged_cloud);
-publishPointCloud(objects_cloud, cloud_object_pub_);
+  // 4. Extract the remaining colored objects (red, blue, purple)
+  PointCPtr objects_cloud = extractGraspableObjects(merged_cloud);
+  publishPointCloud(objects_cloud, cloud_object_pub_);
 
-// 5. Cluster the objects and determine their shapes
-std::vector<PointCPtr> object_clusters;
-std::vector<bool> is_cross_shape;
-std::vector<ObjectOrientationData> object_orientations;
+  // 5. Cluster the objects and determine their shapes
+  std::vector<PointCPtr> object_clusters;
+  std::vector<bool> is_cross_shape;
+  std::vector<ObjectOrientationData> object_orientations;
 
-bool clustering_success = clusterAndClassifyObjects(
-objects_cloud, object_clusters, is_cross_shape, object_orientations);
+  bool clustering_success = clusterAndClassifyObjects(
+  objects_cloud, object_clusters, is_cross_shape, object_orientations);
 
-if (!clustering_success) {
-ROS_ERROR("Failed to cluster and classify objects");
-return false;
-}
+  if (!clustering_success) {
+    ROS_ERROR("Failed to cluster and classify objects");
+    return false;
+  }
 
-// Count the objects and shapes
-total_num_shapes = object_clusters.size();
-for (bool is_cross : is_cross_shape) {
-if (is_cross) {
-num_cross_shapes++;
-} else {
-num_nought_shapes++;
-}
-}
+  // Count the objects and shapes
+  total_num_shapes = object_clusters.size();
+  for (bool is_cross : is_cross_shape) {
+    if (is_cross) {
+      num_cross_shapes++;
+    } 
+    else {
+      num_nought_shapes++;
+    }
+  }
 
-// Print the results
-ROS_INFO("\n====== OBJECT COUNTING RESULTS ======");
-ROS_INFO("Total number of objects: %d", total_num_shapes);
-ROS_INFO("Number of cross shapes: %d", num_cross_shapes);
-ROS_INFO("Number of nought shapes: %d", num_nought_shapes);
+  // Print the results
+  ROS_INFO("\n====== OBJECT COUNTING RESULTS ======");
+  ROS_INFO("Total number of objects: %d", total_num_shapes);
+  ROS_INFO("Number of cross shapes: %d", num_cross_shapes);
+  ROS_INFO("Number of nought shapes: %d", num_nought_shapes);
 
-// 6. Determine which shape is more common
-bool grasp_cross_shape = (num_cross_shapes >= num_nought_shapes);
-int num_most_common_shape = grasp_cross_shape ? num_cross_shapes : num_nought_shapes;
+  // 6. Determine which shape is more common
+  bool grasp_cross_shape = (num_cross_shapes >= num_nought_shapes);
+  int num_most_common_shape = grasp_cross_shape ? num_cross_shapes : num_nought_shapes;
 
-ROS_INFO("Most common shape: %s (Count: %d)", 
-grasp_cross_shape ? "CROSS" : "NOUGHT", num_most_common_shape);
+  ROS_INFO("Most common shape: %s (Count: %d)", 
+  grasp_cross_shape ? "CROSS" : "NOUGHT", num_most_common_shape);
 
-// 7. Find the largest object of the most common shape
-int largest_idx = -1;
-float max_size = -1.0;
+  // 7. Find the largest object of the most common shape
+  int largest_idx = -1;
+  float max_size = -1.0;
 
-for (size_t i = 0; i < object_clusters.size(); i++) {
-// 筛选出符合 most common shape 的物体
-if (is_cross_shape[i] != grasp_cross_shape) continue;
+  for (size_t i = 0; i < object_clusters.size(); i++) {
+    // Get the largest object of the most common shape
+    if (is_cross_shape[i] != grasp_cross_shape) 
+      continue;
 
-// 计算物体尺寸（这里用点云的边界框对角线长度）
-PointT min_pt, max_pt;
-pcl::getMinMax3D(*object_clusters[i], min_pt, max_pt);
-float size = sqrt(pow(max_pt.x - min_pt.x, 2) +
-  pow(max_pt.y - min_pt.y, 2) +
-  pow(max_pt.z - min_pt.z, 2));
+    // Calculate the size of the object
+    PointT min_pt, max_pt;
+    pcl::getMinMax3D(*object_clusters[i], min_pt, max_pt);
 
-ROS_INFO("Object %zu (%s): Size = %.3f", i, 
-is_cross_shape[i] ? "CROSS" : "NOUGHT", size);
+    float size = sqrt(pow(max_pt.x - min_pt.x, 2) +
+      pow(max_pt.y - min_pt.y, 2) +
+      pow(max_pt.z - min_pt.z, 2));
 
-if (size > max_size) {
-max_size = size;
-largest_idx = i;
-}
-}
+    ROS_INFO("Object %zu (%s): Size = %.3f", i, is_cross_shape[i] ? "CROSS" : "NOUGHT", size);
 
-if (largest_idx == -1) {
-ROS_ERROR("No objects of the most common shape found");
-return false;
-}
+    if (size > max_size) {
+      max_size = size;
+      largest_idx = i;
+    }
+  }
 
-ROS_INFO("Largest object of most common shape: Index %d, Size %.3f", largest_idx, max_size);
+  if (largest_idx == -1) {
+    ROS_ERROR("No objects of the most common shape found");
+  }
 
-// 8. Prepare data for grasping only the largest object
-std::vector<PointCPtr> largest_cluster = {object_clusters[largest_idx]};
-std::vector<bool> largest_is_cross = {is_cross_shape[largest_idx]};
-std::vector<ObjectOrientationData> largest_orientation = {object_orientations[largest_idx]};
+  ROS_INFO("Largest object of most common shape: Index %d, Size %.3f", largest_idx, max_size);
 
-// 9. Grasp and place the largest object
-bool grasp_success = graspAndPlaceObjectsOfType(
-largest_cluster, largest_is_cross, largest_orientation, grasp_cross_shape, basket_center);
+  // 8. Prepare data for grasping only the largest object
+  std::vector<PointCPtr> largest_cluster = {object_clusters[largest_idx]};
+  std::vector<bool> largest_is_cross = {is_cross_shape[largest_idx]};
+  std::vector<ObjectOrientationData> largest_orientation = {object_orientations[largest_idx]};
 
-if (!grasp_success) {
-ROS_WARN("Failed to grasp and place the largest object");
-}
+  // 9. Grasp and place the largest object
+  bool grasp_success = graspAndPlaceObjectsOfType(
+    largest_cluster, largest_is_cross, largest_orientation, grasp_cross_shape, basket_center);
 
-// Set the response values
-response.total_num_shapes = total_num_shapes;
-response.num_most_common_shape = num_most_common_shape;
+  if (!grasp_success) {
+    ROS_WARN("Failed to grasp and place the largest object");
+  }
 
-ROS_INFO("\n====== TASK 3 COMPLETED ======");
-ROS_INFO("Total shapes: %d, Most common shape count: %d", 
-total_num_shapes, num_most_common_shape);
+  // Set the response values
+  response.total_num_shapes = total_num_shapes;
+  response.num_most_common_shape = num_most_common_shape;
 
-return true;
+  ROS_INFO("\n====== TASK 3 COMPLETED ======");
+  ROS_INFO("Total shapes: %d, Most common shape count: %d", 
+  total_num_shapes, num_most_common_shape);
+
+  return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -463,7 +463,8 @@ return true;
 ///////////////////////////////////////////////////////////////////////////////
 
 // Get axes and grasp pose
-ObjectOrientationData cw2::determineObjectOrientation(
+ObjectOrientationData 
+cw2::determineObjectOrientation(
     PointCPtr object_cloud,
     const std::string &shape_type) {
   
@@ -571,7 +572,8 @@ ObjectOrientationData cw2::determineObjectOrientation(
 
 // Grasp for 2 shapes
 // offset_override - for Task3 any size, use any grasp offset
-bool cw2::planAndExecuteGrasp(
+bool 
+cw2::planAndExecuteGrasp(
     const geometry_msgs::Point &object_point,
     const ObjectOrientationData &orientation_data,
     const std::string &shape_type,
@@ -817,7 +819,8 @@ bool cw2::planAndExecuteGrasp(
   return true;
 }
 
-bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
+bool 
+cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
   ROS_INFO("\n====== PLANNING AND EXECUTING PLACE ======");
   
   // Step 0: Calculate place positions
@@ -892,7 +895,8 @@ bool cw2::planAndExecutePlace(const geometry_msgs::Point &place_point) {
 }
 
 // Publish point cloud for visualization
-void cw2::publishPointCloud(const PointCPtr &cloud, const ros::Publisher &publisher) {
+void 
+cw2::publishPointCloud(const PointCPtr &cloud, const ros::Publisher &publisher) {
   if (cloud->empty()) {
     ROS_WARN("Cannot publish empty point cloud");
     return;
@@ -923,7 +927,8 @@ void cw2::publishPointCloud(const PointCPtr &cloud, const ros::Publisher &publis
 
 
 // Modified shape determination to use point cloud centroid instead of message-provided center point
-bool cw2::determineObjectShape(PointCPtr cloud, const geometry_msgs::Point &center_point) {
+bool 
+cw2::determineObjectShape(PointCPtr cloud, const geometry_msgs::Point &center_point) {
   ROS_INFO("\n====== DETERMINING SHAPE TYPE FROM CAMERA ======");
   
   // If cloud is empty, can't make determination
@@ -1025,7 +1030,8 @@ bool cw2::determineObjectShape(PointCPtr cloud, const geometry_msgs::Point &cent
 }
 
 // Extract the brown basket from the point cloud
-PointCPtr cw2::extractBrownBasket(const PointCPtr& cloud) {
+PointCPtr 
+cw2::extractBrownBasket(const PointCPtr& cloud) {
   ROS_INFO("Extracting brown basket from point cloud...");
   
   PointCPtr basket_cloud(new PointC);
@@ -1061,12 +1067,9 @@ PointCPtr cw2::extractBrownBasket(const PointCPtr& cloud) {
   return basket_cloud;
 }
 
-/**
- * Finds the center of the basket from a point cloud
- * @param basket_cloud Point cloud of the brown basket
- * @return 3D point representing the basket center
- */
-geometry_msgs::Point cw2::findBasketCenter(const PointCPtr& basket_cloud) {
+// Finds the center of the basket from a point cloud
+geometry_msgs::Point 
+cw2::findBasketCenter(const PointCPtr& basket_cloud) {
   ROS_INFO("Finding basket center from %zu points", basket_cloud->points.size());
   
   if (basket_cloud->empty()) {
@@ -1181,7 +1184,8 @@ geometry_msgs::Point cw2::findBasketCenter(const PointCPtr& basket_cloud) {
 }
 
 // Extract black obstacles from the point cloud
-PointCPtr cw2::extractBlackObstacles(const PointCPtr& cloud) {
+PointCPtr 
+cw2::extractBlackObstacles(const PointCPtr& cloud) {
   ROS_INFO("Extracting black obstacles from point cloud...");
   
   PointCPtr obstacles_cloud(new PointC);
@@ -1217,7 +1221,8 @@ PointCPtr cw2::extractBlackObstacles(const PointCPtr& cloud) {
   return obstacles_cloud;
 }
 
-void cw2::addObstaclesToPlanningScene(const PointCPtr& obstacles_cloud) {
+void 
+cw2::addObstaclesToPlanningScene(const PointCPtr& obstacles_cloud) {
   ROS_INFO("Adding black obstacles to planning scene using OctoMap representation");
   
   if (obstacles_cloud->empty()) {
@@ -1268,7 +1273,8 @@ void cw2::addObstaclesToPlanningScene(const PointCPtr& obstacles_cloud) {
 }
 
 // Extract red, blue, or purple graspable objects
-PointCPtr cw2::extractGraspableObjects(const PointCPtr& cloud) {
+PointCPtr 
+cw2::extractGraspableObjects(const PointCPtr& cloud) {
   ROS_INFO("Extracting graspable objects (red, blue, purple) from point cloud...");
   
   PointCPtr objects_cloud(new PointC);
@@ -1308,7 +1314,8 @@ PointCPtr cw2::extractGraspableObjects(const PointCPtr& cloud) {
 }
 
 // Cluster and classify objects, returning orientation data for each
-bool cw2::clusterAndClassifyObjects(
+bool 
+cw2::clusterAndClassifyObjects(
     const PointCPtr& objects_cloud,
     std::vector<PointCPtr>& object_clusters,
     std::vector<bool>& is_cross_shape,
@@ -1445,7 +1452,8 @@ bool cw2::clusterAndClassifyObjects(
   return !object_clusters.empty();
 }
 
-visualization_msgs::MarkerArray cw2::createPCAAxesMarkers(
+visualization_msgs::MarkerArray 
+cw2::createPCAAxesMarkers(
     const Eigen::Vector4f& centroid,
     const Eigen::Vector3f& primary_axis,
     const Eigen::Vector3f& secondary_axis,
@@ -1499,15 +1507,9 @@ visualization_msgs::MarkerArray cw2::createPCAAxesMarkers(
   return marker_array;
 }
 
-/**
- * Calculates the optimal grasp offset based on object dimensions
- * @param object_cloud The point cloud of the object
- * @param centroid The object's centroid
- * @param orientation_data The pre-calculated orientation data from determineObjectOrientation
- * @param is_cross Whether the object is a cross (true) or nought (false)
- * @return The calculated grasp offset
- */
-float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& centroid, 
+// Calculates the grasp offset based on object dimensions
+float 
+cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& centroid, 
                            const ObjectOrientationData& orientation_data, bool is_cross) {
   float default_offset = is_cross ? 0.06 : 0.08;
   
@@ -1581,71 +1583,63 @@ float cw2::calculateGraspOffset(PointCPtr object_cloud, const Eigen::Vector4f& c
   return offset;
 }
 
-/**
- * Plan and execute grasping and placing of objects by type
- * @param object_clusters Vector of object point clouds
- * @param is_cross_shape Vector of booleans indicating if each object is a cross
- * @param object_orientations Vector of orientation data for each object
- * @param grasp_cross_shape Whether to grasp cross (true) or nought (false) objects
- * @param basket_center Position of the basket center for placing
- * @return true if at least one object was successfully grasped and placed
- */
-bool cw2::graspAndPlaceObjectsOfType(
-  const std::vector<PointCPtr> &object_clusters,
-  const std::vector<bool> &is_cross_shape,
-  const std::vector<ObjectOrientationData> &object_orientations,
-  bool grasp_cross_shape,
-  const geometry_msgs::Point &basket_center) {
-ROS_INFO("\n====== GRASPING AND PLACING LARGEST OBJECT OF TYPE: %s ======",
-         grasp_cross_shape ? "CROSS" : "NOUGHT");
+// Grasp and place the largest object of the most common shape
+bool 
+cw2::graspAndPlaceObjectsOfType(
+    const std::vector<PointCPtr> &object_clusters,
+    const std::vector<bool> &is_cross_shape,
+    const std::vector<ObjectOrientationData> &object_orientations,
+    bool grasp_cross_shape,
+    const geometry_msgs::Point &basket_center) {
+  ROS_INFO("\n====== GRASPING AND PLACING LARGEST OBJECT OF TYPE: %s ======",
+          grasp_cross_shape ? "CROSS" : "NOUGHT");
 
-if (object_clusters.empty()) {
-  ROS_ERROR("No objects to grasp");
-  return false;
-}
+  if (object_clusters.empty()) {
+    ROS_ERROR("No objects to grasp");
+    return false;
+  }
 
-if (object_clusters.size() != 1) {
-  ROS_WARN("Expected exactly 1 object to grasp, but got %zu", object_clusters.size());
-}
+  if (object_clusters.size() != 1) {
+    ROS_WARN("Expected exactly 1 object to grasp, but got %zu", object_clusters.size());
+  }
 
-// Check if the largest object matches the expected type
-size_t i = 0;
-if (is_cross_shape[i] != grasp_cross_shape) {
-  ROS_ERROR("Object shape does not match expected type");
-  return false;
-}
+  // Check if the largest object matches the expected type
+  size_t i = 0;
+  if (is_cross_shape[i] != grasp_cross_shape) {
+    ROS_ERROR("Object shape does not match expected type");
+    return false;
+  }
 
-Eigen::Vector4f centroid;
-pcl::compute3DCentroid(*object_clusters[i], centroid);
-geometry_msgs::Point object_center;
-object_center.x = centroid[0];
-object_center.y = centroid[1];
-object_center.z = centroid[2] + t3_grasp_height_offset_;
+  Eigen::Vector4f centroid;
+  pcl::compute3DCentroid(*object_clusters[i], centroid);
+  geometry_msgs::Point object_center;
+  object_center.x = centroid[0];
+  object_center.y = centroid[1];
+  object_center.z = centroid[2] + t3_grasp_height_offset_;
 
-float grasp_offset = calculateGraspOffset(
-    object_clusters[i], centroid, object_orientations[i], is_cross_shape[i]);
+  float grasp_offset = calculateGraspOffset(
+      object_clusters[i], centroid, object_orientations[i], is_cross_shape[i]);
 
-bool grasp_success = planAndExecuteGrasp(
-    object_center, object_orientations[i], 
-    is_cross_shape[i] ? "cross" : "nought", grasp_offset);
+  bool grasp_success = planAndExecuteGrasp(
+      object_center, object_orientations[i], 
+      is_cross_shape[i] ? "cross" : "nought", grasp_offset);
 
-if (!grasp_success) {
-  ROS_WARN("Failed to grasp the largest object");
-  return false;
-}
+  if (!grasp_success) {
+    ROS_WARN("Failed to grasp the largest object");
+    return false;
+  }
 
-// 放置到篮子中心
-geometry_msgs::Point place_point = basket_center;
-place_point.z += 0.01; // 稍微抬高一点，避免碰撞
+  geometry_msgs::Point place_point = basket_center;
+  place_point.z += 0.01; 
 
-bool place_success = planAndExecutePlace(place_point);
-if (!place_success) {
-  ROS_WARN("Failed to place the largest object");
-  return false;
-}
+  bool place_success = planAndExecutePlace(place_point);
+  if (!place_success) {
+    ROS_WARN("Failed to place the largest object");
+    return false;
+  }
 
-ROS_INFO("Successfully grasped and placed the largest object");
-return true;
+  ROS_INFO("Successfully grasped and placed the largest object");
+  return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1724,7 +1718,8 @@ cw2::moveGripper(float width, float wait_time)
 }
 
 // Update visualization function to use pre-calculated grasp direction
-void cw2::visualizePCAAxes(
+void 
+cw2::visualizePCAAxes(
     const Eigen::Matrix3f &eigenvectors,
     const geometry_msgs::Point &center_point,
     const std::string &shape_type,
@@ -1816,7 +1811,8 @@ void cw2::visualizePCAAxes(
 }
 
 // Helper function to get latest point cloud from a topic
-PointCPtr cw2::getLatestPointCloud(const std::string& topic, const std::string& target_frame) {
+PointCPtr 
+cw2::getLatestPointCloud(const std::string& topic, const std::string& target_frame) {
   ROS_INFO("Waiting for point cloud message from %s...", topic.c_str());
   PointCPtr cloud(new PointC);
   
@@ -1884,7 +1880,8 @@ PointCPtr cw2::getLatestPointCloud(const std::string& topic, const std::string& 
 }
 
 // Filter out green points
-PointCPtr cw2::filterPointCloudByColor(const PointCPtr& input_cloud) {
+PointCPtr 
+cw2::filterPointCloudByColor(const PointCPtr& input_cloud) {
   ROS_INFO("Filtering point cloud by color...");
   PointCPtr cloud_color_filtered(new PointC);
   
@@ -1936,7 +1933,8 @@ PointCPtr cw2::filterPointCloudByColor(const PointCPtr& input_cloud) {
 }
 
 // Modified processPointCloud to use the new color filtering function
-PointCPtr cw2::processPointCloud(const PointCPtr& input_cloud) {
+PointCPtr 
+cw2::processPointCloud(const PointCPtr& input_cloud) {
   ROS_INFO("\n====== PROCESSING POINT CLOUD ======");
   ROS_INFO("Input cloud has %lu points", input_cloud->points.size());
   
@@ -1976,7 +1974,8 @@ PointCPtr cw2::processPointCloud(const PointCPtr& input_cloud) {
 }
 
 // Add a new function to visualize grasp points
-void cw2::visualizeGraspPoint(const geometry_msgs::Point &grasp_point, const tf2::Quaternion &orientation) {
+void 
+cw2::visualizeGraspPoint(const geometry_msgs::Point &grasp_point, const tf2::Quaternion &orientation) {
   visualization_msgs::Marker marker;
   marker.header.frame_id = base_frame_;
   marker.header.stamp = ros::Time::now();
@@ -2012,7 +2011,8 @@ void cw2::visualizeGraspPoint(const geometry_msgs::Point &grasp_point, const tf2
 }
 
 // Add this function to create and add a floor collision object
-void cw2::addFloorCollisionObject() {
+void 
+cw2::addFloorCollisionObject() {
   ROS_INFO("Adding floor collision object to planning scene");
   
   // Create a collision object message
@@ -2050,10 +2050,9 @@ void cw2::addFloorCollisionObject() {
   ROS_INFO("Floor collision object added to planning scene");
 }
 
-/**
- * Callback for the point cloud subscription in continuous scanning mode
- */
-void cw2::continuousScanCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg) {
+// Callback for the point cloud subscription in continuous scanning mode
+void 
+cw2::continuousScanCloudCallback(const sensor_msgs::PointCloud2ConstPtr& msg) {
   // Only process clouds when scanning is active
   if (!is_collecting_clouds_) {
     return;
@@ -2113,11 +2112,8 @@ void cw2::continuousScanCloudCallback(const sensor_msgs::PointCloud2ConstPtr& ms
            downsampled_cloud->points.size(), cloud->points.size());
 }
 
-/**
- * Check if a point is likely part of the green floor
- * Uses a simple HSV-based color filter
- */
-bool cw2::isGreenPoint(const PointT& point) {
+bool 
+cw2::isGreenPoint(const PointT& point) {
   // Convert RGB to HSV
   float r = point.r / 255.0f;
   float g = point.g / 255.0f;
@@ -2146,11 +2142,9 @@ bool cw2::isGreenPoint(const PointT& point) {
   return (h >= 60.0f && h <= 160.0f && s >= 0.05f && v >= 0.1f);
 }
 
-/**
- * Merge multiple point clouds into one
- * Simply concatenates all points from input clouds
- */
-PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
+// Merge multiple point clouds into one, simply concatenates all points from input clouds
+PointCPtr 
+cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
   PointCPtr merged_cloud(new PointC);
   
   // Return empty cloud if no input
@@ -2179,7 +2173,6 @@ PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
   merged_cloud->height = 1;
   merged_cloud->is_dense = false;
 
-  // 添加离群点移除
   PointCPtr cleaned_cloud(new PointC);
   pcl::StatisticalOutlierRemoval<PointT> sor;
   sor.setInputCloud(merged_cloud);
@@ -2203,13 +2196,9 @@ PointCPtr cw2::mergeClouds(const std::vector<PointCPtr>& clouds) {
   return final_cloud;
 }
 
-/**
- * Performs a continuous scanning motion to capture the entire scene
- * Breaks the rectangular path into separate segments for better planning
- * 
- * @return Merged point cloud of the entire scene
- */
-PointCPtr cw2::continuousScanSceneFromMultipleViewpoints() {
+// Performs a continuous scanning motion to capture the entire scene
+PointCPtr 
+cw2::continuousScanSceneFromMultipleViewpoints() {
   ROS_INFO("Starting continuous scanning motion...");
   
   // Define rectangular path parameters
@@ -2338,15 +2327,9 @@ PointCPtr cw2::continuousScanSceneFromMultipleViewpoints() {
   return merged_scene;
 }
 
-/**
- * Helper method to move the arm along a Cartesian path
- * @param waypoints List of poses defining the path
- * @param eef_step Step size for end effector
- * @param jump_threshold Jump threshold (0.0 to disable)
- * @param speed_factor Speed factor (0.0-1.0, lower is slower)
- * @return true if successful
- */
-bool cw2::moveAlongCartesianPath(
+// Move the arm along a Cartesian path
+bool 
+cw2::moveAlongCartesianPath(
     const std::vector<geometry_msgs::Pose>& waypoints,
     double eef_step,
     double jump_threshold,
