@@ -45,7 +45,7 @@ To run the task:
 ```bash
 rosservice call /task 1
 ```
-### Task 2 - (Lucas %, Sonny % hours in total)
+### Task 2 - (Lucas %, Sonny %, hours in total)
 Given two reference shapes and one mystery shape, the manipulator analyzes the scene and determines which reference shape matches the mystery shape.
 
 To run the task:
@@ -61,7 +61,7 @@ The identified shapes are outputted in the ROS console as such:
 [ INFO] [1743889837.305624743, 338.589000000]: Mystery object shape: CROSS
 ```
 
-### Task 3 - (Lucas %, Sonny % hours in total)
+### Task 3 - (Lucas %, Sonny %, hours in total)
 Task Objectives:
 - Count the total number of objects, excluding the black obstacles.
 - Identify which shape appears most frequently (or determine if there's a tie).
@@ -72,10 +72,10 @@ To run the task:
 rosservice call /task 3
 ```
 
-The identified total shapes are outputted in the ROS console as such:
+The identified total shapes and the most common shape count are outputted in the ROS console as such:
 ```console
 ====== TASK 3 COMPLETED ======
-[ INFO] [1743890238.553513906, 151.865000000]: Total shapes: 3, Most common shape count: 2
+[ INFO] [1743890238.553513906, 151.865000000]: Total shapes: 6, Most common shape count: 4
 ```
 
 ## License
