@@ -5,16 +5,10 @@ Authors: Lucas Young, Sonny Mo
 Description: Coursework 2 - Pick and Place, Object Detection and Localization
 
 ## Pre-Requisites
-```bash
-sudo apt install ros-noetic-franka-ros ros-noetic-libfranka
-```
-Gazebo physics simluator is also needed (http://gazebosim.org/). This can be installed and then run with:
-```bash
-curl -sSL http://get.gazebosim.org | sh
-gazebo
-```
 
-To run this task following packages are required: 
+To run this task following environment/packages are required: 
+- ROS Noetic
+- Gazebo
 - Point Cloud Library
 - MoveIt
 - tf2
