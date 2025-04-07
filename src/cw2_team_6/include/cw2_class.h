@@ -233,6 +233,12 @@ public:
                            const ObjectOrientationData& orientation_data, bool is_cross);
 
   //////////////////////////////////////////////////////////////////////////////////////////////////
+  bool
+  recordInitialJointValues();
+
+  bool
+  resetArm();
+
   /* ----- class member variables ----- */
 
   ros::NodeHandle nh_;
@@ -316,6 +322,9 @@ public:
   float t3_nought_grasp_offset_base_;
   float t3_cross_grasp_offset_base_;
   float t3_merge_voxel_size_;
+
+  // Initial joint configuration
+  std::vector<double> initial_joint_values_;
 
 private:
   // No private

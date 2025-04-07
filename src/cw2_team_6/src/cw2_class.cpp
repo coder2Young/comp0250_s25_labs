@@ -113,6 +113,9 @@ bool
 cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   cw2_world_spawner::Task1Service::Response &response) 
 {
+  // Record initial joint values for reseting the arm to the initial configuration
+  recordInitialJointValues();
+
   /* Task 1: Implementation for object grasping with orientation detection */
   ROS_INFO("\n\n====== TASK 1 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 1 has been triggered");
@@ -205,6 +208,10 @@ cw2::t1_callback(cw2_world_spawner::Task1Service::Request &request,
   }
 
   ROS_INFO("\n====== TASK 1 COMPLETED ======\n");
+  
+  // Reset arm to initial configuration
+  resetArm();
+  
   return true;
 }
 
@@ -212,6 +219,9 @@ bool
 cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   cw2_world_spawner::Task2Service::Response &response)
 {
+  // Record initial joint values for reseting the arm to the initial configuration
+  recordInitialJointValues();
+
   /* Task 2: Implementation for shape recognition between cross and nought shapes */
   ROS_INFO("\n\n====== TASK 2 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 2 has been triggered");
@@ -324,6 +334,10 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
   }
 
   ROS_INFO("\n====== TASK 2 COMPLETED ======\n");
+  
+  // Reset arm to initial configuration
+  resetArm();
+  
   return true;
 }
 
@@ -331,6 +345,10 @@ cw2::t2_callback(cw2_world_spawner::Task2Service::Request &request,
 bool 
 cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request, 
     cw2_world_spawner::Task3Service::Response &response) {
+
+  // Record initial joint values for reseting the arm to the initial configuration
+  recordInitialJointValues();
+  
   ROS_INFO("\n\n====== TASK 3 STARTED ======\n");
   ROS_INFO("The coursework solving callback for task 3 has been triggered");
 
@@ -454,7 +472,10 @@ cw2::t3_callback(cw2_world_spawner::Task3Service::Request &request,
   ROS_INFO("\n====== TASK 3 COMPLETED ======");
   ROS_INFO("Total shapes: %d, Most common shape count: %d", 
   total_num_shapes, num_most_common_shape);
-
+  
+  // Reset arm to initial configuration
+  resetArm();
+  
   return true;
 }
 
@@ -2360,4 +2381,48 @@ cw2::moveAlongCartesianPath(
             fraction * 100.0);
     return false;
   }
+}
+
+bool
+cw2::recordInitialJointValues() {
+  initial_joint_values_ = arm_group_.getCurrentJointValues();
+  if (debug_) {
+    ROS_INFO("Initial joint configuration recorded with %zu joints", initial_joint_values_.size());
+    for (size_t i = 0; i < initial_joint_values_.size(); i++) {
+      ROS_INFO("Joint %zu: %.4f rad", i, initial_joint_values_[i]);
+    }
+  }
+  return true;
+}
+
+// Add this new function to reset the arm to initial configuration
+bool
+cw2::resetArm()
+{
+  ROS_INFO("Resetting arm to initial joint configuration...");
+  
+  // Make sure we have valid joint values
+  if (initial_joint_values_.empty()) {
+    ROS_ERROR("No initial joint configuration recorded!");
+    return false;
+  }
+  
+  // Set the target joint values
+  arm_group_.setJointValueTarget(initial_joint_values_);
+  
+  // Plan and execute
+  moveit::planning_interface::MoveGroupInterface::Plan reset_plan;
+  bool success = (arm_group_.plan(reset_plan) == 
+    moveit::planning_interface::MoveItErrorCode::SUCCESS);
+  
+  if (!success) {
+    ROS_ERROR("Failed to plan path to initial configuration");
+    return false;
+  }
+  
+  ROS_INFO("Executing movement to initial configuration");
+  arm_group_.execute(reset_plan);
+  
+  ROS_INFO("Arm successfully reset to initial configuration");
+  return true;
 }

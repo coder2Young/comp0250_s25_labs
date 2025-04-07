@@ -78,7 +78,7 @@ The identified total shapes and the most common shape count are outputted in the
 [ INFO] [1743890238.553513906, 151.865000000]: Total shapes: 6, Most common shape count: 4
 ```
 
-Based on multiple experiments, the task achieves 100% accuracy in judging the quantity and shape of objects. However, due to the complexity of the scene, the PCA-based grasp pose analysis is not that accurate, resulting in a certain probability of failure in the grasping task, with a success rate of 80%.
+Based on multiple experiments, the task achieves 100% accuracy in judging the quantity and shape of objects. However, due to the complexity of the scene and object point cloud, the PCA-based grasp pose analysis is not that accurate, resulting in a certain probability of failure in the grasping task, with a success rate of 80%.
 
 ## License
 Github Repo: [https://github.com/coder2Young/comp0250_s25_labs](https://github.com/coder2Young/comp0250_s25_labs.git)
